@@ -1,1501 +1,1642 @@
 /**
- * ChronoMaster Game Engine & Controller
- * Integrates Matter.js 2D physics, strict layer dependency hierarchies,
- * combo streaks, ASMR audio, dopamine reward unboxing, and Royal Museum progression.
+ * ChronoMaster Game Controller
+ * Screens (workshop home / level), level play on Matter.js, rewards, rewarded-ad placements,
+ * daily return loops and the apprentice story.
  */
+const HIT_RADIUS = 28;
+const SPIN_MS = 220;
+const FLY_MS = 380;
+const MAX_TRAY = 7;
+const PRICES = { magnet: 150, slot: 120, loupe: 100, undo: 60, revive: 120 };
+const BOOSTER_INFO = {
+  magnet: { icon: '🧲', title: 'Mıknatıs', desc: 'Kutunun rengindeki bir vidayı, üstü kapalı olsa bile çekip kutuya koyar.' },
+  slot: { icon: '➕', title: 'Ekstra Yuva', desc: 'Bu seviye boyunca yedek tepsiye bir yuva ekler.' },
+  loupe: { icon: '🔍', title: 'Büyüteç', desc: 'Parçaların altında saklanan vidaları 6 saniye boyunca gösterir.' },
+  undo: { icon: '↩️', title: 'Geri Al', desc: 'Son hamleni geri alır (kutu kapanana kadar).' }
+};
+const DAILY_REWARDS = [
+  { gears: 80 },
+  { boosters: { magnet: 1 } },
+  { gears: 150 },
+  { boosters: { loupe: 1, slot: 1 } },
+  { gears: 250 },
+  { boosters: { magnet: 2 } },
+  { gears: 400, stars: 1, boosters: { slot: 1, loupe: 1 } }
+];
+const COMBO_WORDS = [[12, 'EFSANE!'], [8, 'USTACA!'], [5, 'HARİKA!'], [3, 'GÜZEL!']];
+const GIFT_COOLDOWN_H = 4;
+const VITRIN_CAP_H = 8;
+const PRIVACY_URL = 'https://example.com/chronomaster/gizlilik'; // TODO: kendi gizlilik politikası adresin
+const APP_VERSION = '1.0.0';
 
 class ChronoMasterGame {
   constructor() {
+    this.store = new SaveStore();
+    this.sound = window.soundEngine;
+    this.applySettings();
+    this.ads = new AdService(this.store);
+    this.fx = window.fx = new FX();
     this.canvas = document.getElementById('game-canvas');
     this.renderer = new GameRenderer(this.canvas);
-    this.currentLevelIndex = 0;
-    this.gears = parseInt(localStorage.getItem('chronomaster_gears') || '250', 10);
-    this.unlockedLevel = parseInt(localStorage.getItem('chronomaster_unlocked') || '1', 10);
-    this.unlockedMuseum = JSON.parse(localStorage.getItem('chronomaster_museum') || '[1]');
-    this.unlockedWorkshop = JSON.parse(localStorage.getItem('chronomaster_workshop') || '[]');
-    this.lastMuseumClaim = parseInt(localStorage.getItem('chronomaster_last_claim') || Date.now().toString(), 10);
-    
-    // Game State
-    this.levelData = null;
-    this.boxes = [];
-    this.screws = [];
-    this.plates = [];
-    this.plateBodies = new Map(); // plateId -> Matter.Body
-    this.screwConstraints = new Map(); // screwId -> array of Matter.Constraint
-    this.bufferSlots = [];
-    this.maxBufferSlots = 5;
-    this.historyStack = [];
-    this.isAnimating = false;
-    this.isGameOver = false;
-    this.isVictory = false;
+    this.workshop = new Workshop(this);
 
-    // Dopamine & Combo Tracking
-    this.comboStreak = 0;
-    this.maxComboThisLevel = 0;
-    this.maxBufferOccupiedThisLevel = 0;
-    this.chestOpened = false;
-    this._comboTimeout = null;
+    this.engine = Matter.Engine.create({ enableSleeping: false, positionIterations: 8, velocityIterations: 8 });
+    this.engine.gravity.y = 1.15;
 
-    // Boosters
-    this.boosters = {
-      magnet: 2,
-      slot: 1,
-      nudge: 3
-    };
+    this.screen = 'home';
+    this.lv = null;          // live level session
+    this.clock = 0;          // game time (ms), frozen while paused/backgrounded
+    this.timers = [];
+    this.modalStack = [];
+    this.physicsAcc = 0;
 
-    // Physics Engine
-    this.engine = null;
-
-    this.initPhysics();
     this.bindDOM();
-    this.updateMainMenuUI();
-    this.loadLevel(0);
+    this.workshop.mount(document.getElementById('ws-scene'));
+    this.updateHomeUI();
     this.startLoop();
+    this.setupLifecycle();
+
+    if (!this.save.flags.intro) {
+      this.openModal('modal-intro');
+    } else {
+      this.afterReal(600, () => this.greet());
+    }
   }
 
-  initPhysics() {
-    const { Engine, World } = Matter;
-    this.engine = Engine.create({
-      enableSleeping: false,
-      positionIterations: 8,
-      velocityIterations: 8
-    });
-    this.engine.gravity.y = 1.2;
-    this.engine.gravity.x = 0;
+  get save() { return this.store.data; }
+
+  applySettings() {
+    const s = this.save.settings;
+    this.sound.setMuted(!s.sound);
+    this.sound.hapticsOn = !!s.haptics;
+    if (s.ambience && s.sound) this.sound.startClockworkAmbience();
+  }
+
+  // ==========================================================
+  // TIMING: game-time timers pause with the game, real timers don't
+  // ==========================================================
+  after(ms, fn) {
+    this.timers.push({ at: this.clock + ms, fn });
+  }
+
+  afterReal(ms, fn) {
+    setTimeout(fn, ms);
+  }
+
+  runTimers() {
+    if (!this.timers.length) return;
+    const due = this.timers.filter(t => t.at <= this.clock);
+    if (!due.length) return;
+    this.timers = this.timers.filter(t => t.at > this.clock);
+    due.forEach(t => t.fn());
+  }
+
+  // ==========================================================
+  // DOM BINDINGS
+  // ==========================================================
+  $(id) { return document.getElementById(id); }
+
+  on(id, fn) {
+    const el = this.$(id);
+    if (el) el.addEventListener('click', e => { this.sound.resume(); fn(e); });
   }
 
   bindDOM() {
     window.addEventListener('resize', () => {
       this.renderer.resize();
+      if (this.lv) this.renderer.getBoard(this.lv.level);
     });
 
-    // ------------------------------------------
-    // MAIN MENU NAVIGATION
-    // ------------------------------------------
-    const mainMenu = document.getElementById('main-menu');
-    document.getElementById('btn-menu-play').addEventListener('click', () => {
-      window.soundEngine.resume();
-      window.soundEngine.playBooster();
-      mainMenu.classList.add('hidden');
+    // Home
+    this.on('btn-play', () => this.startLevel(this.save.level));
+    this.on('btn-task', () => {
+      const t = this.workshop.nextTask();
+      if (t) this.onWorkshopTask(t.id);
+    });
+    this.on('home-rank', () => this.workshop.say(this.workshop.randomTip(), 4000));
+    this.on('master', () => this.workshop.say(this.workshop.randomTip(), 4000));
+    this.on('btn-settings', () => this.openSettings());
+    this.on('btn-daily', () => this.openDaily());
+    this.on('btn-gift', () => this.claimGift());
+    this.on('btn-vitrin', () => this.openVitrin());
+    this.on('btn-guide', () => this.openModal('modal-guide'));
+    this.on('btn-intro-start', () => {
+      this.closeModal('modal-intro');
+      this.save.flags.intro = true;
+      this.store.save();
+      this.afterReal(500, () => this.workshop.say('Önce bir iş bitir ve yıldız kazan. İlk yıldızla şu örümcek ağlarını temizleriz!', 5200));
     });
 
-    document.getElementById('btn-home').addEventListener('click', () => {
-      this.updateMainMenuUI();
-      mainMenu.classList.remove('hidden');
+    // Level HUD
+    this.on('btn-pause', () => this.openPause());
+    this.on('btn-magnet', () => this.useBooster('magnet'));
+    this.on('btn-slot', () => this.useBooster('slot'));
+    this.on('btn-loupe', () => this.useBooster('loupe'));
+    this.on('btn-undo', () => this.useBooster('undo'));
+    this.on('level-intro', () => this.$('level-intro').classList.add('hidden'));
+
+    // Pause
+    this.on('btn-resume', () => this.closeModal('modal-pause'));
+    this.on('btn-pause-restart', () => { this.closeModal('modal-pause'); this.startLevel(this.lv.n); });
+    this.on('btn-pause-home', () => { this.closeModal('modal-pause'); this.goHome(); });
+    this.on('btn-pause-guide', () => this.openModal('modal-guide'));
+    this.on('btn-pause-sound', () => this.toggleSetting('sound'));
+
+    // Victory
+    this.on('btn-chest', () => this.openChest());
+    this.on('btn-chest-double', () => this.doubleChest());
+    this.on('btn-victory-next', () => { this.closeModal('modal-victory'); this.startLevel(this.save.level); });
+    this.on('btn-victory-home', () => { this.closeModal('modal-victory'); this.goHome(); });
+    this.on('btn-victory-task', () => {
+      this.closeModal('modal-victory');
+      this.goHome();
+      const t = this.workshop.nextTask();
+      if (t) this.afterReal(500, () => this.onWorkshopTask(t.id));
     });
 
-    document.getElementById('btn-menu-museum').addEventListener('click', () => {
-      this.openMuseumModal();
+    // Stuck
+    this.on('btn-stuck-ad', () => this.reviveWithAd());
+    this.on('btn-stuck-gears', () => this.reviveWithGears());
+    this.on('btn-stuck-retry', () => { this.closeModal('modal-stuck'); this.startLevel(this.lv.n); });
+    this.on('btn-stuck-home', () => { this.closeModal('modal-stuck'); this.goHome(); });
+
+    // Booster offer
+    this.on('btn-offer-ad', () => this.buyOffer('ad'));
+    this.on('btn-offer-gears', () => this.buyOffer('gears'));
+
+    // Daily / vitrin / settings / chapter
+    this.on('btn-daily-claim', () => this.claimDaily(false));
+    this.on('btn-daily-double', () => this.claimDaily(true));
+    this.on('btn-vitrin-claim', () => this.claimVitrin(false));
+    this.on('btn-vitrin-double', () => this.claimVitrin(true));
+    this.on('set-sound', () => this.toggleSetting('sound'));
+    this.on('set-ambience', () => this.toggleSetting('ambience'));
+    this.on('set-haptics', () => this.toggleSetting('haptics'));
+    this.on('set-privacy', () => window.open(PRIVACY_URL, '_blank'));
+    this.on('set-adprivacy', async () => {
+      const ok = await this.ads.showPrivacyOptions();
+      if (!ok) this.fx.toast('Reklam tercihleri Android sürümünde açılır.');
+    });
+    this.on('set-reset', () => this.confirm('Tüm ilerleme silinsin mi?', 'Atölye, yıldızlar ve seviyeler sıfırlanır. Bu geri alınamaz.', () => {
+      this.store.reset();
+      location.reload();
+    }));
+    this.on('btn-chapter-ok', () => this.closeModal('modal-chapter'));
+    this.on('btn-confirm-yes', () => { const fn = this._confirmFn; this.closeModal('modal-confirm'); if (fn) fn(); });
+    this.on('btn-confirm-no', () => this.closeModal('modal-confirm'));
+
+    // Generic close buttons
+    document.querySelectorAll('[data-close]').forEach(btn => {
+      btn.addEventListener('click', () => this.closeModal(btn.getAttribute('data-close')));
     });
 
-    document.getElementById('btn-close-museum').addEventListener('click', () => {
-      document.getElementById('modal-museum').classList.add('hidden');
+    // Canvas taps
+    this.canvas.addEventListener('pointerdown', e => {
+      this.sound.resume();
+      const r = this.canvas.getBoundingClientRect();
+      this.onTap(e.clientX - r.left, e.clientY - r.top);
     });
-
-    document.getElementById('btn-claim-museum').addEventListener('click', () => {
-      this.claimMuseumIncome();
-    });
-
-    document.getElementById('btn-victory-museum').addEventListener('click', () => {
-      document.getElementById('modal-victory').classList.add('hidden');
-      this.openMuseumModal();
-    });
-
-    // Workshop Modal Buttons
-    const btnMenuWorkshop = document.getElementById('btn-menu-workshop');
-    if (btnMenuWorkshop) {
-      btnMenuWorkshop.addEventListener('click', () => {
-        this.openWorkshopModal();
-      });
-    }
-
-    const btnHudWorkshop = document.getElementById('btn-hud-workshop');
-    if (btnHudWorkshop) {
-      btnHudWorkshop.addEventListener('click', () => {
-        this.openWorkshopModal();
-      });
-    }
-
-    const btnVictoryWorkshop = document.getElementById('btn-victory-workshop');
-    if (btnVictoryWorkshop) {
-      btnVictoryWorkshop.addEventListener('click', () => {
-        document.getElementById('modal-victory').classList.add('hidden');
-        this.openWorkshopModal();
-      });
-    }
-
-    const btnCloseWorkshop = document.getElementById('btn-close-workshop');
-    if (btnCloseWorkshop) {
-      btnCloseWorkshop.addEventListener('click', () => {
-        document.getElementById('modal-workshop').classList.add('hidden');
-      });
-    }
-
-    document.getElementById('btn-menu-guide').addEventListener('click', () => {
-      document.getElementById('modal-guide').classList.remove('hidden');
-    });
-
-    document.getElementById('btn-guide-hud').addEventListener('click', () => {
-      document.getElementById('modal-guide').classList.remove('hidden');
-    });
-
-    document.getElementById('btn-close-guide').addEventListener('click', () => {
-      document.getElementById('modal-guide').classList.add('hidden');
-    });
-
-    document.getElementById('btn-close-guide-action').addEventListener('click', () => {
-      document.getElementById('modal-guide').classList.add('hidden');
-    });
-
-    document.getElementById('btn-menu-levels').addEventListener('click', () => {
-      this.openLevelsModal();
-    });
-
-    // Sound & Ambience Toggles
-    const btnSound = document.getElementById('btn-sound');
-    btnSound.addEventListener('click', () => {
-      const isMuted = window.soundEngine.toggleMute();
-      document.getElementById('sound-icon').textContent = isMuted ? '🔇' : '🔊';
-      document.getElementById('menu-sound-icon').textContent = isMuted ? '🔇' : '🔊';
-    });
-
-    document.getElementById('btn-menu-sound').addEventListener('click', () => {
-      const isMuted = window.soundEngine.toggleMute();
-      document.getElementById('sound-icon').textContent = isMuted ? '🔇' : '🔊';
-      document.getElementById('menu-sound-icon').textContent = isMuted ? '🔇' : '🔊';
-    });
-
-    document.getElementById('btn-menu-ambience').addEventListener('click', () => {
-      window.soundEngine.resume();
-      const isActive = window.soundEngine.toggleAmbience();
-      document.getElementById('menu-ambience-icon').textContent = isActive ? '🔔' : '⏱️';
-    });
-
-    // Restart Button
-    document.getElementById('btn-restart').addEventListener('click', () => {
-      this.restartLevel();
-    });
-
-    // Level Select Modal
-    document.getElementById('btn-levels').addEventListener('click', () => {
-      this.openLevelsModal();
-    });
-    document.getElementById('btn-close-levels').addEventListener('click', () => {
-      document.getElementById('modal-levels').classList.add('hidden');
-    });
-
-    // Interactive Mystery Chest in Victory Modal
-    const btnOpenChest = document.getElementById('btn-open-chest');
-    if (btnOpenChest) {
-      btnOpenChest.addEventListener('click', () => {
-        this.openVictoryChest();
-      });
-    }
-
-    // Victory Modal Buttons
-    document.getElementById('btn-next-level').addEventListener('click', () => {
-      document.getElementById('modal-victory').classList.add('hidden');
-      this.loadLevel(this.currentLevelIndex + 1);
-    });
-    document.getElementById('btn-replay-level').addEventListener('click', () => {
-      document.getElementById('modal-victory').classList.add('hidden');
-      this.restartLevel();
-    });
-
-    // Game Over Modal Buttons
-    document.getElementById('btn-retry-level').addEventListener('click', () => {
-      document.getElementById('modal-gameover').classList.add('hidden');
-      this.restartLevel();
-    });
-    document.getElementById('btn-extra-slot-revive').addEventListener('click', () => {
-      document.getElementById('modal-gameover').classList.add('hidden');
-      this.addExtraBufferSlot();
-      this.isGameOver = false;
-    });
-    document.getElementById('btn-gameover-home').addEventListener('click', () => {
-      document.getElementById('modal-gameover').classList.add('hidden');
-      this.updateMainMenuUI();
-      mainMenu.classList.remove('hidden');
-    });
-
-    // Boosters
-    document.getElementById('btn-booster-magnet').addEventListener('click', () => this.useBoosterMagnet());
-    document.getElementById('btn-booster-slot').addEventListener('click', () => this.addExtraBufferSlot(true));
-    document.getElementById('btn-booster-nudge').addEventListener('click', () => this.useBoosterNudge());
-    document.getElementById('btn-booster-undo').addEventListener('click', () => this.undoLastMove());
-
-    // Canvas Pointer Events (Click / Tap)
-    this.canvas.addEventListener('pointerdown', (e) => this.handleCanvasPointer(e));
-
-    // Prevent default touch gestures (pinch/zoom) on mobile
-    this.canvas.addEventListener('touchstart', (e) => e.preventDefault(), { passive: false });
+    this.canvas.addEventListener('touchstart', e => e.preventDefault(), { passive: false });
+    document.addEventListener('contextmenu', e => e.preventDefault());
   }
 
-  updateMainMenuUI() {
-    const totalArtifacts = window.MUSEUM_ARTIFACTS.length;
-    const restoredCount = this.unlockedMuseum.length;
-    const pct = Math.min(100, Math.round((restoredCount / totalArtifacts) * 100));
-
-    const ranks = [
-      'Çırak Saatçi',
-      'Kalfa Mekanist',
-      'Hassas Kilit Ustası',
-      'Kraliyet Horoloğu',
-      'Başmühendis & Saat Üstadı'
-    ];
-    const rankTitle = ranks[Math.min(ranks.length - 1, restoredCount - 1)] || 'Çırak Saatçi';
-
-    document.getElementById('menu-rank').textContent = rankTitle;
-    document.getElementById('menu-rank-fill').style.width = `${pct}%`;
-    document.getElementById('menu-progress-text').textContent = `${restoredCount} / ${totalArtifacts} Eser Restore Edildi`;
-    document.getElementById('menu-gears-count').textContent = this.gears;
-    document.getElementById('gear-count').textContent = this.gears;
-  }
-
-  loadLevel(levelIndex) {
-    this.currentLevelIndex = levelIndex;
-    this.isGameOver = false;
-    this.isVictory = false;
-    this.isAnimating = false;
-    this.historyStack = [];
-    this.maxBufferSlots = 5;
-
-    // Reset Dopamine Stats
-    this.comboStreak = 0;
-    this.maxComboThisLevel = 0;
-    this.maxBufferOccupiedThisLevel = 0;
-    this.chestOpened = false;
-
-    // Hide combo banner
-    const comboBanner = document.getElementById('combo-streak-banner');
-    if (comboBanner) comboBanner.classList.add('hidden');
-
-    // Reset Matter World
-    Matter.World.clear(this.engine.world, false);
-    this.plateBodies.clear();
-    this.screwConstraints.clear();
-
-    // Fetch Level Data
-    if (levelIndex < window.LEVELS.length) {
-      this.levelData = JSON.parse(JSON.stringify(window.LEVELS[levelIndex]));
-    } else {
-      this.levelData = window.generateProceduralLevel(levelIndex + 1);
-    }
-
-    // Set Level Info in UI
-    document.getElementById('level-name').textContent = this.levelData.name;
-    document.getElementById('level-subtitle').textContent = this.levelData.subtitle;
-    document.getElementById('gear-count').textContent = this.gears;
-
-    this.boxes = this.levelData.boxes;
-    this.screws = this.levelData.screws;
-    this.plates = this.levelData.plates;
-
-    // Initialize Buffer Slots
-    this.bufferSlots = new Array(this.maxBufferSlots).fill(null);
-
-    // Build Matter.js physics bodies for each plate
-    this.buildPhysics();
-
-    // Render HTML UI components
-    this.renderBoxesUI();
-    this.renderBufferUI();
-    this.updateBoosterUI();
-
-    // Update Tutorial Banner
-    const banner = document.getElementById('tutorial-banner');
-    const bannerText = document.getElementById('banner-text');
-    if (banner && bannerText) {
-      if (this.levelData.kineticTriggers && this.levelData.kineticTriggers.length > 0) {
-        banner.classList.remove('hidden');
-        bannerText.textContent = "⚙️ ÇARK MEKANİZMASI: Üst parçayı düşürdüğünüzde gizli dişliler dönerek vidaları kaydırır!";
-      } else if (levelIndex === 0) {
-        banner.classList.remove('hidden');
-        bannerText.textContent = "KURAL: Üst pirinç çıtanın vidalarını sökmeden alttaki gövdeye dokunamazsınız!";
-      } else if (levelIndex === 1) {
-        banner.classList.remove('hidden');
-        bannerText.textContent = "Tek vida kaldığında parçanın sarkaç gibi salınışından yararlanın!";
-      } else if (levelIndex === 2) {
-        banner.classList.remove('hidden');
-        bannerText.textContent = "Çapraz emniyet kolları birbirini kilitliyor. En üstteki kolu bulun!";
+  setupLifecycle() {
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        this.sound.setPaused(true);
+        this.store.save();
       } else {
-        banner.classList.add('hidden');
+        this.sound.setPaused(false);
+        this.lastFrame = performance.now();
+        if (this.screen === 'home') this.updateHomeUI();
       }
-    }
-
-    // Workshop Perk: Velvet Tools (+1 Nudge booster bonus)
-    if (this.unlockedWorkshop.includes('tools')) {
-      this.boosters.nudge = Math.max(this.boosters.nudge, 4);
-      this.updateBoosterUI();
-    }
-
-    // Save unlock progress
-    if (levelIndex + 1 > this.unlockedLevel) {
-      this.unlockedLevel = levelIndex + 1;
-      localStorage.setItem('chronomaster_unlocked', this.unlockedLevel);
-    }
-  }
-
-  restartLevel() {
-    this.loadLevel(this.currentLevelIndex);
-  }
-
-  buildPhysics() {
-    const { Bodies, World, Constraint } = Matter;
-
-    // 1. Create Plate Rigid Bodies with non-interfering layer collision filters
-    this.plates.forEach(plate => {
-      let body;
-      const opts = {
-        frictionAir: 0.015,
-        restitution: 0.2,
-        density: 0.005,
-        isSleeping: false,
-        collisionFilter: { group: -1, mask: 0, category: 0 }
-      };
-
-      if (plate.type === 'rect' || plate.type === 'bar') {
-        body = Bodies.rectangle(plate.x, plate.y, plate.width, plate.height, {
-          ...opts,
-          chamfer: { radius: Math.min(plate.radius || 12, plate.width / 2, plate.height / 2) }
-        });
-      } else if (plate.type === 'circle' || plate.type === 'gear') {
-        body = Bodies.circle(plate.x, plate.y, plate.radius, opts);
-      }
-
-      if (plate.angle) {
-        Matter.Body.setAngle(body, plate.angle);
-      }
-
-      body.plateId = plate.id;
-      this.plateBodies.set(plate.id, body);
-      World.add(this.engine.world, body);
     });
 
-    // 2. Create Revolute Pin Constraints for each Screw
-    this.screws.forEach(screw => {
-      const constraints = [];
-
-      screw.plates.forEach(plateId => {
-        const body = this.plateBodies.get(plateId);
-        if (!body) return;
-
-        const angle = body.angle;
-        const dx = screw.x - body.position.x;
-        const dy = screw.y - body.position.y;
-
-        const localX = dx * Math.cos(-angle) - dy * Math.sin(-angle);
-        const localY = dx * Math.sin(-angle) + dy * Math.cos(-angle);
-
-        const constraint = Constraint.create({
-          bodyA: body,
-          pointA: { x: localX, y: localY },
-          pointB: { x: screw.x, y: screw.y },
-          stiffness: 1.0,
-          length: 0,
-          damping: 0.05
-        });
-
-        World.add(this.engine.world, constraint);
-        constraints.push(constraint);
-      });
-
-      this.screwConstraints.set(screw.id, constraints);
-    });
-
-    // 3. Initialize plate states (static if >= 2 screws, dynamic swing if 1, falling if 0)
-    this.updatePlatePhysicsStates();
-  }
-
-  updatePlatePhysicsStates() {
-    this.plates.forEach(plate => {
-      if (plate.isCleared) return;
-      const body = this.plateBodies.get(plate.id);
-      if (!body) return;
-
-      const holdingScrews = this.screws.filter(s => s.plates.includes(plate.id));
-
-      if (holdingScrews.length >= 2) {
-        // Matter 0.19 overwrites _original on repeated setStatic(true) → mass=Infinity → NaN pose
-        if (!body.isStatic) Matter.Body.setStatic(body, true);
-      } else if (holdingScrews.length === 1) {
-        if (body.isStatic) {
-          Matter.Body.setStatic(body, false);
-          // Realistic pendulum swing impulse
-          Matter.Body.setAngularVelocity(body, (Math.random() > 0.5 ? 1 : -1) * 0.04);
-        }
-        Matter.Sleeping.set(body, false);
-      } else {
-        // 0 screws holding this plate! Full physical detachment!
-        if (body.isStatic) {
-          Matter.Body.setStatic(body, false);
-        }
-
-        // Dopamine pop and spark burst
-        window.soundEngine.playPlateRelease();
-        this.renderer.spawnSparks(body.position.x, body.position.y, '#ffd700', 25);
-        this.renderer.spawnFloatingText(body.position.x, body.position.y, `${plate.name} Serbest! ✨`, '#d4af37');
-
-        Matter.Body.setVelocity(body, {
-          x: (Math.random() - 0.5) * 2.0,
-          y: Math.max(body.velocity.y, 2.2)
-        });
-        Matter.Body.setAngularVelocity(body, (Math.random() - 0.5) * 0.1);
-        Matter.Sleeping.set(body, false);
-      }
+    const App = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.App;
+    if (App && App.addListener) {
+      App.addListener('backButton', () => this.handleBack());
+      App.addListener('pause', () => this.store.save());
+    }
+    window.addEventListener('keydown', e => {
+      if (e.key === 'Escape') this.handleBack();
     });
   }
 
-  // ==========================================
-  // UI RENDERING (BOXES & BUFFER)
-  // ==========================================
-
-  renderBoxesUI() {
-    const track = document.getElementById('boxes-track');
-    track.innerHTML = '';
-
-    this.boxes.forEach((box, index) => {
-      const boxEl = document.createElement('div');
-      boxEl.className = `screw-box ${index === 0 ? 'active' : 'queued'}`;
-      boxEl.id = `box-${box.id}`;
-
-      const colorData = window.SCREW_TYPES[box.color] || window.SCREW_TYPES.gold;
-
-      boxEl.innerHTML = `
-        <div class="box-header">
-          <span class="box-label" style="color:${colorData.hex}">${box.label}</span>
-          <span class="box-counter">${box.filled}/${box.capacity}</span>
-        </div>
-        <div class="box-slots-row">
-          ${[0, 1, 2].map(slotIdx => {
-            const isFilled = slotIdx < box.filled;
-            return `
-              <div class="box-hole ${isFilled ? 'filled' : ''}" id="hole-${box.id}-${slotIdx}">
-                ${isFilled ? `<div class="screw-icon ${colorData.colorClass}"></div>` : ''}
-              </div>
-            `;
-          }).join('')}
-        </div>
-      `;
-
-      track.appendChild(boxEl);
-    });
-  }
-
-  renderBufferUI() {
-    const container = document.getElementById('buffer-slots');
-    container.innerHTML = '';
-
-    let occupiedCount = 0;
-
-    for (let i = 0; i < this.maxBufferSlots; i++) {
-      const screw = this.bufferSlots[i];
-      const hole = document.createElement('div');
-      hole.className = `buffer-hole ${screw ? 'occupied' : ''}`;
-      hole.id = `buffer-hole-${i}`;
-
-      if (screw) {
-        occupiedCount++;
-        const colorData = window.SCREW_TYPES[screw.color] || window.SCREW_TYPES.gold;
-        hole.innerHTML = `<div class="screw-icon ${colorData.colorClass}"></div>`;
-      }
-
-      container.appendChild(hole);
-    }
-
-    document.getElementById('buffer-status').textContent = `${occupiedCount} / ${this.maxBufferSlots}`;
-  }
-
-  updateBoosterUI() {
-    document.getElementById('count-magnet').textContent = this.boosters.magnet;
-    document.getElementById('count-slot').textContent = this.boosters.slot;
-    document.getElementById('count-nudge').textContent = this.boosters.nudge;
-  }
-
-  // ==========================================
-  // SCREW INTERACTION & LAYER DEPENDENCY ENGINE
-  // ==========================================
-
-  handleCanvasPointer(e) {
-    if (this.isAnimating || this.isGameOver || this.isVictory) return;
-
-    const rect = this.canvas.getBoundingClientRect();
-    const screenX = e.clientX - rect.left;
-    const screenY = e.clientY - rect.top;
-
-    const virtPos = this.renderer.screenToVirtual(screenX, screenY);
-
-    let clickedScrew = null;
-    let minDist = 26; // virtual hit radius
-
-    for (const screw of this.screws) {
-      const dist = Math.hypot(screw.x - virtPos.x, screw.y - virtPos.y);
-      if (dist < minDist) {
-        clickedScrew = screw;
-        minDist = dist;
-      }
-    }
-
-    if (!clickedScrew) return;
-
-    // Check strict layer hierarchy: Is this screw locked by an overlapping upper plate?
-    const blockingPlate = this.findBlockingPlate(clickedScrew);
-    if (blockingPlate) {
-      this.renderer.triggerShake(220, 6);
-      window.soundEngine.playChainRattle();
-      this.renderer.setHighlightedPlate(blockingPlate.id);
-      this.renderer.spawnFloatingText(clickedScrew.x, clickedScrew.y, `Önce ${blockingPlate.name} Sökülmeli! ⛓️`, "#ff3344");
+  handleBack() {
+    if (this.ads.busy) return;
+    const top = this.modalStack[this.modalStack.length - 1];
+    if (top) {
+      if (['modal-victory', 'modal-intro'].includes(top)) return;
+      if (top === 'modal-stuck') { this.closeModal('modal-stuck'); this.goHome(); return; }
+      this.closeModal(top);
       return;
     }
-
-    this.processScrewClick(clickedScrew);
+    if (this.screen === 'play') {
+      this.openPause();
+      return;
+    }
+    const App = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.App;
+    if (App && App.minimizeApp) App.minimizeApp().catch(() => App.exitApp && App.exitApp());
+    else if (App && App.exitApp) App.exitApp();
   }
 
-  /**
-   * Evaluates layer dependency: A screw is strictly blocked if an overlapping upper plate
-   * (or a plate specified in dependsOn) still has uncleared screws holding it down!
-   */
-  findBlockingPlate(screw) {
-    // 1. Only the screw's topmost plate decides dependsOn; the plates it passes through below don't
-    let topPlate = null;
-    for (const plateId of screw.plates) {
-      const plate = this.plates.find(p => p.id === plateId);
-      if (plate && (!topPlate || plate.layer > topPlate.layer)) topPlate = plate;
+  // ==========================================================
+  // MODALS
+  // ==========================================================
+  openModal(id) {
+    const el = this.$(id);
+    if (!el) return;
+    el.classList.remove('hidden');
+    this.modalStack = this.modalStack.filter(m => m !== id);
+    this.modalStack.push(id);
+    if (this.screen === 'play' && ['modal-pause', 'modal-offer', 'modal-guide', 'modal-stuck'].includes(id)) {
+      this.paused = true;
+    }
+  }
+
+  closeModal(id) {
+    const el = this.$(id);
+    if (el) el.classList.add('hidden');
+    this.modalStack = this.modalStack.filter(m => m !== id);
+    const stillPausing = this.modalStack.some(m => ['modal-pause', 'modal-offer', 'modal-guide', 'modal-stuck'].includes(m));
+    if (!stillPausing) this.paused = false;
+  }
+
+  confirm(title, text, fn) {
+    this.$('confirm-title').textContent = title;
+    this.$('confirm-text').textContent = text;
+    this._confirmFn = fn;
+    this.openModal('modal-confirm');
+  }
+
+  // ==========================================================
+  // SCREENS
+  // ==========================================================
+  showScreen(name) {
+    this.screen = name;
+    this.$('screen-home').classList.toggle('hidden', name !== 'home');
+    this.$('screen-play').classList.toggle('hidden', name !== 'play');
+    document.getElementById('game-container').classList.toggle('in-level', name === 'play');
+    this.$('master-bubble').classList.add('hidden');
+    if (name === 'play') this.renderer.resize();
+  }
+
+  goHome() {
+    this.endLevelSession();
+    this.showScreen('home');
+    this.workshop.refresh();
+    this.updateHomeUI();
+    const t = this.workshop.nextTask();
+    if (t && this.workshop.canAfford(t)) {
+      this.afterReal(400, () => this.workshop.say(`Yıldızların yetiyor! Hadi şu işi halledelim: ${t.title.toLowerCase()}.`, 3600));
+    }
+  }
+
+  greet() {
+    const t = this.workshop.nextTask();
+    if (this.dailyAvailable()) {
+      this.workshop.say('Günaydın evlat! Bugünün hediyesi masada seni bekliyor.', 3600);
+    } else if (t && this.workshop.canAfford(t)) {
+      this.workshop.say(`Hoş geldin! Yıldızların hazır, ${t.title.toLowerCase()} zamanı.`, 3600);
+    } else {
+      this.workshop.say('Hoş geldin! Müşteriler kapıda sıra oldu, işe koyulalım.', 3200);
+    }
+  }
+
+  updateCurrencyUI() {
+    const s = this.save;
+    ['stars-count', 'victory-stars-total'].forEach(id => { const el = this.$(id); if (el) el.textContent = s.stars; });
+    ['gears-count', 'gear-count', 'victory-gears-total', 'vitrin-gears'].forEach(id => { const el = this.$(id); if (el) el.textContent = s.gears; });
+  }
+
+  updateHomeUI() {
+    const s = this.save;
+    this.updateCurrencyUI();
+    const rank = this.workshop.rank();
+    this.$('home-rank-title').textContent = rank.title;
+    this.$('home-rank-sub').textContent = rank.next ? `${rank.next} olmaya ${rank.total - rank.done} onarım` : 'Atölye tamamen yenilendi!';
+    this.$('home-rank-fill').style.width = `${Math.round((rank.done / rank.total) * 100)}%`;
+
+    const t = this.workshop.nextTask();
+    const card = this.$('task-card');
+    if (t) {
+      const ch = t.chapter;
+      const done = ch.tasks.filter(x => this.workshop.has(x.id)).length;
+      card.classList.remove('hidden');
+      this.$('task-chapter').textContent = `Bölüm ${ch.id}: ${ch.title}`;
+      this.$('task-chapter-count').textContent = `${done}/${ch.tasks.length}`;
+      this.$('task-progress-fill').style.width = `${(done / ch.tasks.length) * 100}%`;
+      this.$('task-icon').textContent = t.icon;
+      this.$('task-title').textContent = t.title;
+      const ready = this.workshop.canAfford(t);
+      this.$('task-cost').textContent = `⭐ ${Math.min(s.stars, t.cost)}/${t.cost}`;
+      const btn = this.$('btn-task');
+      btn.textContent = ready ? 'ONAR 🔨' : 'Yıldız kazan';
+      btn.classList.toggle('ready', ready);
+      card.classList.toggle('ready', ready);
+    } else {
+      card.classList.add('hidden');
     }
 
-    if (topPlate && topPlate.dependsOn) {
-      for (const parentId of topPlate.dependsOn) {
-        const parentPlate = this.plates.find(p => p.id === parentId);
-        if (parentPlate && !parentPlate.isCleared && !screw.plates.includes(parentId)) {
-          return parentPlate;
-        }
-      }
+    const n = s.level;
+    const master = window.Levels.isMasterpiece(n);
+    this.$('play-label').textContent = `SEVİYE ${n}`;
+    this.$('play-sub').textContent = master ? '★ Şaheser restorasyonu' : 'Müşteri siparişi';
+    this.$('btn-play').classList.toggle('masterpiece', master);
+
+    this.$('daily-badge').classList.toggle('hidden', !this.dailyAvailable());
+    this.updateGiftUI();
+    const income = this.vitrinIncome();
+    const vb = this.$('vitrin-badge');
+    vb.classList.toggle('hidden', income.amount < 1);
+    vb.textContent = income.amount > 999 ? '999+' : `+${income.amount}`;
+  }
+
+  // ==========================================================
+  // LEVEL SETUP
+  // ==========================================================
+  startLevel(n) {
+    this.endLevelSession();
+    const level = window.Levels.getLevel(n);
+    const tools = this.workshop.has('tools') ? 1 : 0;
+    const lv = this.lv = {
+      n,
+      level,
+      plates: [],
+      plateById: new Map(),
+      screws: [],
+      boxes: level.boxes.map(b => Object.assign({ reserved: 0, filled: 0, done: false }, b)),
+      traySize: level.bufferSize,
+      tray: new Array(level.bufferSize).fill(null),
+      history: [],
+      undoLeft: 3 + tools,
+      revived: false,
+      reviveCost: PRICES.revive,
+      adRevives: 0,
+      peakTray: 0,
+      combo: 0,
+      maxCombo: 0,
+      gearsEarned: 0,
+      inFlight: 0,
+      ended: false,
+      xrayUntil: 0,
+      highlight: null,
+      hint: null,
+      startedAt: this.clock
+    };
+
+    Matter.Composite.clear(this.engine.world, false);
+    this.timers = [];
+    this.physicsAcc = 0;
+
+    // Plates (+ mounting holes in local coordinates)
+    level.plates.forEach(def => {
+      const plate = Object.assign({}, def, { holes: [], cleared: false, falling: false, wobbleT: 0 });
+      const opts = { frictionAir: 0.02, restitution: 0.1, density: 0.004, collisionFilter: { group: -1, mask: 0, category: 0 } };
+      plate.body = (plate.type === 'circle' || plate.type === 'gear')
+        ? Matter.Bodies.circle(plate.x, plate.y, plate.radius, opts)
+        : Matter.Bodies.rectangle(plate.x, plate.y, plate.width, plate.height, opts);
+      if (plate.angle) Matter.Body.setAngle(plate.body, plate.angle);
+      Matter.Body.setStatic(plate.body, true);
+      Matter.Composite.add(this.engine.world, plate.body);
+      lv.plates.push(plate);
+      lv.plateById.set(plate.id, plate);
+    });
+
+    // Rusty screws from level 6 on (deterministic per level)
+    const rng = window.Levels.mulberry32(n * 97 + 13);
+    const rustCount = n >= 6 ? Math.min(4, 1 + Math.floor((n - 6) / 5)) : 0;
+    const rusty = new Set();
+    while (rusty.size < Math.min(rustCount, level.screws.length)) rusty.add(Math.floor(rng() * level.screws.length));
+
+    level.screws.forEach((def, i) => {
+      const screw = Object.assign({}, def, { state: 'board', rust: rusty.has(i) ? 1 : 0, rot: rng() * Math.PI, constraints: [], anim: null });
+      screw.plates.forEach(pid => {
+        const plate = lv.plateById.get(pid);
+        const a = plate.angle || 0;
+        const dx = screw.x - plate.x;
+        const dy = screw.y - plate.y;
+        const lx = dx * Math.cos(-a) - dy * Math.sin(-a);
+        const ly = dx * Math.sin(-a) + dy * Math.cos(-a);
+        plate.holes.push({ x: lx, y: ly });
+        const c = Matter.Constraint.create({
+          bodyA: plate.body, pointA: { x: lx, y: ly }, pointB: { x: screw.x, y: screw.y },
+          stiffness: 0.9, damping: 0.1, length: 0
+        });
+        Matter.Composite.add(this.engine.world, c);
+        screw.constraints.push(c);
+      });
+      lv.screws.push(screw);
+    });
+
+    this.showScreen('play');
+    this.renderer.particles = [];
+    this.renderer.texts = [];
+    this.renderer.rings = [];
+    this.renderer.getBoard(level);
+    this.$('level-name').textContent = level.masterpiece ? `ŞAHESER · ${n}` : `SEVİYE ${n}`;
+    this.$('level-subtitle').textContent = `${level.job.customer} · ${level.job.item}`;
+    this.$('screen-play').classList.toggle('masterpiece', level.masterpiece);
+    this.$('combo-banner').classList.add('hidden');
+    this.syncBoxes();
+    this.syncTray();
+    this.updateBoosterUI();
+    this.updateCurrencyUI();
+    this.showLevelIntro();
+    this.levelTutorials();
+  }
+
+  endLevelSession() {
+    if (!this.lv) return;
+    this.lv.ended = true;
+    this.lv = null;
+    this.timers = [];
+    this.$('boxes-track').innerHTML = '';
+    this.$('fx-layer').querySelectorAll('.flying-projectile').forEach(el => el.remove());
+  }
+
+  showLevelIntro() {
+    const lv = this.lv;
+    const el = this.$('level-intro');
+    this.$('intro-kicker').textContent = lv.level.masterpiece ? 'ŞAHESER RESTORASYONU' : `${lv.level.job.customer} getirdi`;
+    this.$('intro-item').textContent = lv.level.job.item;
+    this.$('intro-goal').textContent = `⭐⭐⭐ için: tepside en fazla ${lv.level.starTray} vida, devam hakkı kullanmadan`;
+    el.classList.toggle('masterpiece', lv.level.masterpiece);
+    el.classList.remove('hidden');
+    this.after(2600, () => el.classList.add('hidden'));
+  }
+
+  levelTutorials() {
+    const n = this.lv.n;
+    const f = this.save.flags;
+    const say = (key, text, delay = 900) => {
+      if (f[key]) return;
+      f[key] = true;
+      this.store.save();
+      this.after(delay, () => this.workshop.say(text, 4800));
+    };
+    if (n === 1) {
+      this.lv.hint = 's1';
+      say('t1', 'Üstteki kutu PİRİNÇ vida istiyor. Parlayan pirinç vidaya dokun!', 2700);
+    } else if (n === 3) {
+      say('t3', 'Tek vidası kalan parça sallanır ve altındaki vidaları artık engellemez.', 2700);
+    } else if (n === 4) {
+      say('t4', 'Zorlanırsan alttaki aletler senin: Mıknatıs, +1 Yuva, Büyüteç ve Geri Al.', 2700);
     }
+    if (this.lv.screws.some(s => s.rust)) say('trust', 'Paslı vidalar var! Önce bir kez dokunup pasını çöz, sonra sök.', 2900);
+  }
 
-    // 2. Check physical geometrical overlap with any uncleared plate on a higher layer
-    const screwMaxLayer = topPlate ? topPlate.layer : 0;
+  // ==========================================================
+  // RULES
+  // ==========================================================
+  pinCount(plate) {
+    let n = 0;
+    for (const s of this.lv.screws) if (s.state === 'board' && s.plates.includes(plate.id)) n++;
+    return n;
+  }
 
-    for (const plate of this.plates) {
-      if (plate.isCleared) continue;
-      if (plate.layer > screwMaxLayer) {
-        const body = this.plateBodies.get(plate.id);
-        if (body && this.isPointInPlate(screw.x, screw.y, plate, body)) {
-          return plate;
-        }
-      }
+  /** The static plate covering this screw, or null when it can be unscrewed. */
+  blockerOf(screw) {
+    for (const pid of screw.coveredBy) {
+      const p = this.lv.plateById.get(pid);
+      if (p && !p.cleared && p.body.isStatic) return p;
     }
     return null;
   }
 
-  isScrewBlocked(screw) {
-    return this.findBlockingPlate(screw) !== null;
+  activeBox() {
+    return this.lv.boxes.find(b => b.reserved < b.capacity) || null;
   }
 
-  isPointInPlate(px, py, plate, body) {
-    const cos = Math.cos(-body.angle);
-    const sin = Math.sin(-body.angle);
-    const dx = px - body.position.x;
-    const dy = py - body.position.y;
-    const lx = dx * cos - dy * sin;
-    const ly = dx * sin + dy * cos;
-
-    if (plate.type === 'rect' || plate.type === 'bar') {
-      const halfW = plate.width / 2;
-      const halfH = plate.height / 2;
-      return Math.abs(lx) <= halfW && Math.abs(ly) <= halfH;
-    } else if (plate.type === 'circle' || plate.type === 'gear') {
-      return (lx * lx + ly * ly) <= (plate.radius * plate.radius);
-    }
-    return false;
+  trayCount() {
+    return this.lv.tray.filter(Boolean).length;
   }
 
-  // ==========================================
-  // CORE UNSCREWING & SORTING ALGORITHM
-  // ==========================================
-
-  processScrewClick(screw) {
-    const activeBox = this.boxes[0];
-    const canFitInActiveBox = activeBox && activeBox.color === screw.color && activeBox.filled < activeBox.capacity;
-    const freeBufferIndex = this.bufferSlots.indexOf(null);
-
-    // If active box doesn't accept this screw AND buffer is full -> Cannot unscrew!
-    if (!canFitInActiveBox && freeBufferIndex === -1) {
-      window.soundEngine.playGameOver();
-      const rack = document.getElementById('buffer-rack-container');
-      rack.classList.add('danger-pulse');
-      setTimeout(() => rack.classList.remove('danger-pulse'), 500);
-      this.renderer.spawnFloatingText(screw.x, screw.y, "Yedek Tepsi Dolu!", "#ff4769");
-      return;
-    }
-
-    this.isAnimating = true;
-
-    // Dopamine Combo Calculation
-    if (canFitInActiveBox) {
-      this.comboStreak++;
-      if (this.comboStreak > this.maxComboThisLevel) {
-        this.maxComboThisLevel = this.comboStreak;
-      }
-
-      if (this.comboStreak >= 2) {
-        window.soundEngine.playCombo(this.comboStreak);
-        const comboMultiplier = this.unlockedWorkshop.includes('lamp') ? 10 : 5;
-        const bonusGears = this.comboStreak * comboMultiplier;
-        this.gears += bonusGears;
-        localStorage.setItem('chronomaster_gears', this.gears);
-        document.getElementById('gear-count').textContent = this.gears;
-
-        const banner = document.getElementById('combo-streak-banner');
-        const bannerText = document.getElementById('combo-streak-text');
-        if (banner && bannerText) {
-          banner.classList.remove('hidden');
-          bannerText.textContent = `${this.comboStreak}x ZİNCİRLEME KOMBO! (+${bonusGears} ⚙️)`;
-          clearTimeout(this._comboTimeout);
-          const comboDuration = this.unlockedWorkshop.includes('lamp') ? 3500 : 2000;
-          this._comboTimeout = setTimeout(() => banner.classList.add('hidden'), comboDuration);
+  /** Static ≥2 screws, swinging with 1, falling with 0. */
+  updatePlates(silent = false) {
+    for (const plate of this.lv.plates) {
+      if (plate.cleared) continue;
+      const pins = this.pinCount(plate);
+      const body = plate.body;
+      if (pins >= 2) {
+        if (!body.isStatic) Matter.Body.setStatic(body, true);
+      } else if (pins === 1) {
+        if (body.isStatic) {
+          Matter.Body.setStatic(body, false);
+          if (!silent) Matter.Body.setAngularVelocity(body, (Math.random() > 0.5 ? 1 : -1) * 0.035);
         }
-        this.renderer.spawnFloatingText(screw.x, screw.y, `${this.comboStreak}x KOMBO! 🔥`, '#ffaa00');
-      }
-    } else {
-      this.comboStreak = 0;
-      const occupied = this.bufferSlots.filter(s => s !== null).length + 1;
-      if (occupied > this.maxBufferOccupiedThisLevel) {
-        this.maxBufferOccupiedThisLevel = occupied;
+      } else if (!plate.falling) {
+        if (body.isStatic) Matter.Body.setStatic(body, false);
+        plate.falling = true;
+        if (!silent) {
+          Matter.Body.setVelocity(body, { x: (Math.random() - 0.5) * 2, y: Math.max(body.velocity.y, 2.5) });
+          Matter.Body.setAngularVelocity(body, (Math.random() - 0.5) * 0.08);
+          this.sound.playPlateRelease();
+          this.renderer.spawnSparks(body.position.x, body.position.y, '#ffd700', 18);
+        }
       }
     }
+  }
 
-    // 1. Trigger Animated Screwdriver Overlay
-    this.animateScrewdriver(screw.x, screw.y, () => {
-      // 2. Remove Constraints from Physics Engine
-      const constraints = this.screwConstraints.get(screw.id) || [];
-      constraints.forEach(c => Matter.World.remove(this.engine.world, c));
-      this.screwConstraints.delete(screw.id);
+  // ==========================================================
+  // INPUT
+  // ==========================================================
+  onTap(sx, sy) {
+    const lv = this.lv;
+    if (!lv || lv.ended || this.paused || this.screen !== 'play') return;
+    this.$('level-intro').classList.add('hidden');
+    const v = this.renderer.screenToVirtual(sx, sy);
 
-      // Remove screw from board active array
-      this.screws = this.screws.filter(s => s.id !== screw.id);
+    const near = lv.screws
+      .filter(s => s.state === 'board')
+      .map(s => ({ s, d: Math.hypot(s.x - v.x, s.y - v.y) }))
+      .filter(o => o.d <= HIT_RADIUS)
+      .sort((a, b) => a.d - b.d);
+    const free = near.find(o => !this.blockerOf(o.s));
 
-      // Save for Undo history
-      this.historyStack.push({
-        screw: screw,
-        constraints: constraints,
-        target: canFitInActiveBox ? 'box' : 'buffer',
-        bufferIndex: freeBufferIndex
-      });
-
-      // Sound & Sparks
-      window.soundEngine.playScrewPop();
-      this.renderer.spawnSparks(screw.x, screw.y, window.SCREW_TYPES[screw.color].hex, 16);
-
-      // Update plate physics states (transitions to single-screw pendulum or free fall)
-      this.updatePlatePhysicsStates();
-
-      // 3. 3D Flying Projectile to Active Box or Buffer Rack
-      if (canFitInActiveBox) {
-        const targetHole = document.getElementById(`hole-${activeBox.id}-${activeBox.filled}`);
-        this.animateFlyingScrew(screw, screw.x, screw.y, targetHole, () => {
-          this.sendScrewToBox(screw, activeBox, () => {
-            this.isAnimating = false;
-            this.checkBoardState();
-          });
-        });
+    if (free) {
+      const screw = free.s;
+      if (screw.rust) {
+        this.loosenRust(screw);
       } else {
-        const targetHole = document.getElementById(`buffer-hole-${freeBufferIndex}`);
-        this.animateFlyingScrew(screw, screw.x, screw.y, targetHole, () => {
-          this.sendScrewToBuffer(screw, freeBufferIndex, () => {
-            this.isAnimating = false;
-            this.checkBoardState();
-          });
-        });
+        this.removeScrew(screw);
       }
-    });
-  }
-
-  animateScrewdriver(virtX, virtY, onComplete) {
-    const sPos = this.renderer.virtualToScreen(virtX, virtY);
-    const tool = document.getElementById('screwdriver-tool');
-    tool.style.left = `${sPos.x - 22}px`;
-    tool.style.top = `${sPos.y - 120}px`;
-    tool.classList.remove('hidden');
-    tool.classList.remove('animating');
-    void tool.offsetWidth;
-    tool.classList.add('animating');
-
-    window.soundEngine.playScrewdriverSound();
-
-    setTimeout(() => {
-      tool.classList.add('hidden');
-      tool.classList.remove('animating');
-      onComplete();
-    }, 420);
-  }
-
-  animateFlyingScrew(screw, startVirtX, startVirtY, targetDOMEl, callback) {
-    if (!targetDOMEl) {
-      if (callback) callback();
       return;
     }
 
-    const sPos = this.renderer.virtualToScreen(startVirtX, startVirtY);
-    const flyingLayer = document.getElementById('flying-layer') || document.body;
+    // Tapped a covered screw or just a plate: knock on the topmost static plate there
+    const plate = this.topPlateAt(v.x, v.y);
+    if (plate) {
+      plate.wobbleT = 260;
+      this.sound.playThud();
+      const covered = near.find(o => this.blockerOf(o.s));
+      if (covered && !window.Solver.pointInPlate(covered.s.x, covered.s.y, this.blockerOf(covered.s), 0)) {
+        // Partly visible screw under an edge: say why it won't move
+        lv.highlight = { id: this.blockerOf(covered.s).id, until: this.clock + 700 };
+        this.renderer.spawnFloatingText(covered.s.x, covered.s.y - 18, 'Üstünde parça var!', '#ff6b7f', 14);
+      }
+    }
+  }
 
+  topPlateAt(x, y) {
+    const hits = this.lv.plates
+      .filter(p => !p.cleared && p.body.isStatic && window.Solver.pointInPlate(x, y, p, 0))
+      .sort((a, b) => b.layer - a.layer);
+    return hits[0] || null;
+  }
+
+  loosenRust(screw) {
+    screw.rust = 0;
+    screw.rot += 0.6;
+    this.sound.playRust();
+    this.renderer.spawnSparks(screw.x, screw.y, '#8b4a1c', 14, { speed: 0.6, gravity: 0.12 });
+    this.renderer.spawnFloatingText(screw.x, screw.y - 20, 'Pas çözüldü!', '#e0a060', 13);
+  }
+
+  // ==========================================================
+  // CORE MOVE
+  // ==========================================================
+  removeScrew(screw, { magnet = false } = {}) {
+    const lv = this.lv;
+    const box = this.activeBox();
+    let target;
+    if (box && box.color === screw.color) {
+      target = { type: 'box', box, slot: box.reserved };
+      box.reserved++;
+    } else {
+      if (magnet) return false;
+      const idx = lv.tray.indexOf(null);
+      if (idx === -1) {
+        this.sound.playGameOver();
+        this.fx.bump(this.$('tray-container'), 'danger-pulse');
+        this.renderer.spawnFloatingText(screw.x, screw.y - 18, 'Tepsi dolu!', '#ff4769', 15);
+        return false;
+      }
+      target = { type: 'tray', idx };
+      lv.tray[idx] = { screw, state: 'incoming' };
+    }
+
+    // Undo snapshot (magnet moves are not undoable)
+    if (!magnet) {
+      lv.history.push({
+        screw,
+        target,
+        combo: lv.combo,
+        gears: 0,
+        poses: lv.plates.map(p => ({
+          p, x: p.body.position.x, y: p.body.position.y, angle: p.body.angle, cleared: p.cleared, falling: p.falling
+        }))
+      });
+    } else {
+      lv.history = [];
+    }
+    const entry = magnet ? null : lv.history[lv.history.length - 1];
+
+    // Off the board
+    screw.state = 'leaving';
+    screw.anim = { t0: this.clock };
+    screw.constraints.forEach(c => Matter.Composite.remove(this.engine.world, c));
+    this.updatePlates();
+    this.sound.playScrewdriverSound();
+    this.save.stats.screws++;
+
+    if (target.type === 'box') {
+      lv.combo++;
+      lv.maxCombo = Math.max(lv.maxCombo, lv.combo);
+      if (lv.combo >= 3) {
+        const mult = this.workshop.has('lamp') ? 2 : 1;
+        const bonus = lv.combo * mult;
+        this.addGears(bonus, entry);
+        this.showCombo(screw);
+      }
+      this.syncBoxes();
+    } else {
+      lv.combo = 0;
+      this.$('combo-banner').classList.add('hidden');
+      const occ = this.trayCount();
+      lv.peakTray = Math.max(lv.peakTray, occ);
+      this.syncTray();
+      if (occ === lv.traySize - 1) {
+        this.sound.playWarning();
+        this.fx.bump(this.$('tray-container'), 'warn-pulse');
+      }
+      if (this.lv.n === 2) {
+        const f = this.save.flags;
+        if (!f.t2) {
+          f.t2 = true;
+          this.after(500, () => this.workshop.say('Kutuya uymayan vida yedek tepsiye gider. Tepsi dolarsa sıkışırsın, dikkat!', 4800));
+        }
+      }
+    }
+    if (lv.hint === screw.id) lv.hint = null;
+
+    lv.inFlight++;
+    this.after(SPIN_MS, () => {
+      if (lv.ended) return;
+      this.sound.playScrewPop();
+      this.renderer.spawnSparks(screw.x, screw.y, window.Levels.SCREW_TYPES[screw.color].hex, 10);
+      screw.state = 'out';
+      const from = this.canvasPoint(screw.x, screw.y);
+      const toEl = target.type === 'box' ? this.$(`hole-${target.box.id}-${target.slot}`) : this.$(`tray-${target.idx}`);
+      this.flyScrew(screw.color, from, toEl, () => this.land(screw, target));
+    });
+
+    // First time a hidden screw comes out from under a plate
+    if (!this.save.flags.t1b) {
+      const revealed = lv.screws.find(s => s.state === 'board' && s.coveredBy.length && !this.blockerOf(s));
+      if (revealed) {
+        this.save.flags.t1b = true;
+        lv.hint = revealed.id;
+        this.after(700, () => this.workshop.say('Gördün mü? Parçanın altında saklı bir vida vardı. Üstteki parça gevşeyince ortaya çıktı!', 4800));
+      }
+    }
+    return true;
+  }
+
+  canvasPoint(vx, vy) {
+    const p = this.renderer.virtualToScreen(vx, vy);
+    const r = this.canvas.getBoundingClientRect();
+    return { x: r.left + p.x, y: r.top + p.y };
+  }
+
+  /** DOM projectile with an arc; landing is driven by game time so pauses can't desync it. */
+  flyScrew(color, from, toEl, onLand) {
+    const lv = this.lv;
+    const layer = this.$('fx-layer');
     const proj = document.createElement('div');
-    proj.className = `flying-projectile ${window.SCREW_TYPES[screw.color].colorClass}`;
-    proj.style.left = `${sPos.x - 14}px`;
-    proj.style.top = `${sPos.y - 14}px`;
-    flyingLayer.appendChild(proj);
-
-    window.soundEngine.playScrewSwoosh();
-
-    const targetRect = targetDOMEl.getBoundingClientRect();
-    const wrapperRect = this.canvas.parentElement.getBoundingClientRect();
-
-    const destX = targetRect.left - wrapperRect.left + (targetRect.width / 2) - 14;
-    const destY = targetRect.top - wrapperRect.top + (targetRect.height / 2) - 14;
-
-    const deltaX = destX - (sPos.x - 14);
-    const deltaY = destY - (sPos.y - 14);
-
-    requestAnimationFrame(() => {
-      proj.style.transform = `translate(${deltaX}px, ${deltaY}px) scale(0.9) rotate(360deg)`;
-      proj.style.opacity = '1';
-    });
-
-    setTimeout(() => {
+    proj.className = `flying-projectile ${window.Levels.SCREW_TYPES[color].colorClass}`;
+    const a = this.fx.local(from);
+    const b = toEl ? this.fx.local(toEl) : a;
+    proj.style.left = `${a.x}px`;
+    proj.style.top = `${a.y}px`;
+    layer.appendChild(proj);
+    this.sound.playScrewSwoosh();
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    if (proj.animate) {
+      proj.animate([
+        { transform: 'translate(-50%,-50%) scale(1.25) rotate(0deg)' },
+        { transform: `translate(-50%,-50%) translate(${dx * 0.45}px,${dy * 0.45 - 50}px) scale(1.15) rotate(220deg)`, offset: 0.5 },
+        { transform: `translate(-50%,-50%) translate(${dx}px,${dy}px) scale(0.85) rotate(400deg)` }
+      ], { duration: FLY_MS, easing: 'cubic-bezier(.4,0,.6,1)', fill: 'forwards' });
+    }
+    this.after(FLY_MS, () => {
       proj.remove();
-      if (callback) callback();
-    }, 400);
+      if (lv.ended) return;
+      onLand();
+    });
   }
 
-  sendScrewToBox(screw, box, callback) {
-    const targetSlotIdx = box.filled;
+  land(screw, target) {
+    const lv = this.lv;
+    lv.inFlight--;
+    this.sound.playScrewLand();
+    if (target.type === 'box') {
+      this.fillBox(target.box);
+    } else {
+      const slot = lv.tray[target.idx];
+      if (slot && slot.screw === screw) slot.state = 'here';
+      this.syncTray();
+      this.autofill();
+    }
+    this.checkEnd();
+  }
+
+  fillBox(box) {
     box.filled++;
+    this.syncBoxes();
+    if (box.filled >= box.capacity) this.completeBox(box);
+  }
 
-    const holeEl = document.getElementById(`hole-${box.id}-${targetSlotIdx}`);
-    if (holeEl) {
-      holeEl.classList.add('filled');
-      const colorData = window.SCREW_TYPES[screw.color];
-      holeEl.innerHTML = `<div class="screw-icon ${colorData.colorClass}"></div>`;
+  completeBox(box) {
+    const lv = this.lv;
+    lv.history = []; // can't undo into a closed box
+    this.sound.playBoxComplete();
+    this.save.stats.boxes++;
+    const el = this.$(`box-${box.id}`);
+    if (el) el.classList.add('box-closing');
+    this.addGears(5, null, el);
+    this.after(520, () => {
+      box.done = true;
+      this.syncBoxes();
+      this.checkEnd();
+    });
+    this.autofill();
+  }
+
+  /** Tray screws jump into the open box when colours match. */
+  autofill() {
+    const lv = this.lv;
+    let box = this.activeBox();
+    while (box) {
+      const idx = lv.tray.findIndex(t => t && t.state === 'here' && t.screw.color === box.color);
+      if (idx === -1) break;
+      const slot = lv.tray[idx];
+      slot.state = 'leaving';
+      lv.history = [];
+      const target = { type: 'box', box, slot: box.reserved };
+      box.reserved++;
+      lv.inFlight++;
+      const from = this.$(`tray-${idx}`);
+      this.syncBoxes();
+      const fromPt = from ? from.getBoundingClientRect() : null;
+      this.flyScrew(slot.screw.color, fromPt ? { x: fromPt.left + fromPt.width / 2, y: fromPt.top + fromPt.height / 2 } : { x: 0, y: 0 },
+        this.$(`hole-${box.id}-${target.slot}`), () => {
+          lv.inFlight--;
+          lv.tray[idx] = null;
+          this.syncTray();
+          this.sound.playScrewLand();
+          this.fillBox(box);
+          this.checkEnd();
+        });
+      this.syncTray();
+      this.renderer.spawnFloatingText(200, 470, 'Tepsiden kutuya!', '#9ae6b4', 14);
+      box = this.activeBox();
     }
+  }
 
-    const boxEl = document.getElementById(`box-${box.id}`);
-    if (boxEl) {
-      const counterEl = boxEl.querySelector('.box-counter');
-      if (counterEl) counterEl.textContent = `${box.filled}/${box.capacity}`;
-    }
+  showCombo(screw) {
+    const lv = this.lv;
+    const word = (COMBO_WORDS.find(([n]) => lv.combo >= n) || [0, ''])[1];
+    const banner = this.$('combo-banner');
+    this.$('combo-text').textContent = `${lv.combo}x KOMBO · ${word}`;
+    banner.classList.remove('hidden');
+    this.fx.bump(banner, 'combo-pop');
+    this.sound.playCombo(lv.combo);
+    clearTimeout(this._comboTimer);
+    this._comboTimer = setTimeout(() => banner.classList.add('hidden'), 1800);
+    this.renderer.spawnRing(screw.x, screw.y, 'rgba(255,190,60,0.9)', 46);
+  }
 
-    window.soundEngine.playScrewLand();
-
-    if (box.filled >= box.capacity) {
-      this.handleBoxCompleted(box, callback);
+  addGears(amount, entry = null, fromEl = null) {
+    const lv = this.lv;
+    this.save.gears += amount;
+    if (lv) lv.gearsEarned += amount;
+    if (entry) entry.gears += amount;
+    const counter = this.$('hud-gears');
+    if (fromEl && counter) {
+      this.fx.fly({ from: fromEl, to: counter, html: '⚙️', count: Math.min(5, Math.ceil(amount / 3)), size: 18,
+        onEach: i => this.sound.playCoin(i), onDone: () => { this.updateCurrencyUI(); this.fx.bump(counter); } });
     } else {
-      if (callback) callback();
+      this.updateCurrencyUI();
+      if (counter) this.fx.bump(counter);
     }
   }
 
-  sendScrewToBuffer(screw, slotIndex, callback) {
-    this.bufferSlots[slotIndex] = screw;
-    this.renderBufferUI();
-    window.soundEngine.playScrewLand();
-    if (callback) callback();
-  }
-
-  handleBoxCompleted(box, callback) {
-    window.soundEngine.playBoxComplete();
-    const boxEl = document.getElementById(`box-${box.id}`);
-    if (boxEl) {
-      boxEl.classList.add('box-cleared');
-    }
-
-    setTimeout(() => {
-      this.boxes.shift();
-      this.renderBoxesUI();
-
-      this.gears += 30;
-      localStorage.setItem('chronomaster_gears', this.gears);
-      document.getElementById('gear-count').textContent = this.gears;
-
-      // Check Buffer Autofill Chain Reaction!
-      this.checkBufferAutofill(() => {
-        if (callback) callback();
-      });
-    }, 520);
-  }
-
-  checkBufferAutofill(callback) {
-    const activeBox = this.boxes[0];
-    if (!activeBox) {
-      if (callback) callback();
+  // ==========================================================
+  // END STATES
+  // ==========================================================
+  checkEnd() {
+    const lv = this.lv;
+    if (!lv || lv.ended) return;
+    if (lv.boxes.every(b => b.filled >= b.capacity)) {
+      if (lv.boxes.every(b => b.done)) this.victory();
       return;
     }
+    if (lv.inFlight > 0) return;
+    const box = this.activeBox();
+    if (!box) return;
+    if (lv.tray.indexOf(null) !== -1) return;
+    const canPlace = lv.screws.some(s => s.state === 'board' && s.color === box.color && !this.blockerOf(s));
+    if (!canPlace) this.outOfMoves();
+  }
 
-    let foundIndex = -1;
-    for (let i = 0; i < this.maxBufferSlots; i++) {
-      if (this.bufferSlots[i] && this.bufferSlots[i].color === activeBox.color && activeBox.filled < activeBox.capacity) {
-        foundIndex = i;
-        break;
-      }
+  outOfMoves() {
+    const lv = this.lv;
+    this.sound.playGameOver();
+    this.renderer.triggerShake(260, 7);
+    const adOk = lv.adRevives < 2 && this.ads.isAvailable('revive');
+    this.$('btn-stuck-ad').disabled = !adOk;
+    this.$('btn-stuck-ad').classList.toggle('hidden', lv.adRevives >= 2);
+    this.$('stuck-gear-cost').textContent = lv.reviveCost;
+    this.$('btn-stuck-gears').disabled = this.save.gears < lv.reviveCost || lv.traySize >= MAX_TRAY;
+    this.after(450, () => this.openModal('modal-stuck'));
+  }
+
+  async reviveWithAd() {
+    const ok = await this.ads.showRewarded('revive');
+    if (!ok || !this.lv) return;
+    this.lv.adRevives++;
+    this.revive();
+  }
+
+  reviveWithGears() {
+    const lv = this.lv;
+    if (!lv || this.save.gears < lv.reviveCost) return;
+    this.save.gears -= lv.reviveCost;
+    lv.reviveCost *= 2;
+    this.store.save();
+    this.updateCurrencyUI();
+    this.revive();
+  }
+
+  revive() {
+    const lv = this.lv;
+    lv.revived = true;
+    this.closeModal('modal-stuck');
+    this.addTraySlot();
+    this.fx.toast('+1 yuva açıldı, devam!', 'good');
+  }
+
+  addTraySlot() {
+    const lv = this.lv;
+    if (lv.traySize >= MAX_TRAY) return false;
+    lv.traySize++;
+    lv.tray.push(null);
+    this.syncTray();
+    this.sound.playBooster();
+    const el = this.$(`tray-${lv.traySize - 1}`);
+    if (el) this.fx.burst(el, { count: 14, spread: 60 });
+    return true;
+  }
+
+  // ==========================================================
+  // BOOSTERS & UNDO
+  // ==========================================================
+  useBooster(kind) {
+    const lv = this.lv;
+    if (!lv || lv.ended || this.paused) return;
+    const have = kind === 'undo' ? lv.undoLeft : this.save.boosters[kind];
+    if (have <= 0) {
+      this.openOffer(kind);
+      return;
     }
+    let used = false;
+    if (kind === 'magnet') used = this.boosterMagnet();
+    else if (kind === 'slot') used = this.addTraySlot();
+    else if (kind === 'loupe') used = this.boosterLoupe();
+    else if (kind === 'undo') used = this.undo();
+    if (!used) return;
+    if (kind === 'undo') lv.undoLeft--;
+    else this.save.boosters[kind]--;
+    this.store.save();
+    this.updateBoosterUI();
+  }
 
-    if (foundIndex !== -1) {
-      const screw = this.bufferSlots[foundIndex];
-      this.bufferSlots[foundIndex] = null;
-      this.renderBufferUI();
+  boosterMagnet() {
+    const lv = this.lv;
+    const box = this.activeBox();
+    if (!box) return false;
+    const pool = lv.screws.filter(s => s.state === 'board' && s.color === box.color);
+    if (!pool.length) {
+      this.fx.toast('Tahtada bu kutunun renginde vida kalmadı.');
+      return false;
+    }
+    // Prefer a screw the player can't reach yet
+    const target = pool.find(s => this.blockerOf(s)) || pool[0];
+    target.rust = 0;
+    this.sound.playBooster();
+    this.renderer.spawnFloatingText(target.x, target.y - 20, 'Mıknatıs! 🧲', '#ffd700', 15);
+    this.renderer.spawnRing(target.x, target.y, 'rgba(120,200,255,0.9)', 50);
+    return this.removeScrew(target, { magnet: true });
+  }
 
-      this.renderer.spawnFloatingText(200, 200, "ZİNCİRLEME UYUM!", "#ffd700");
-      window.soundEngine.playScrewLand();
+  boosterLoupe() {
+    const lv = this.lv;
+    const hidden = lv.screws.filter(s => s.state === 'board' && this.blockerOf(s)).length;
+    if (!hidden) {
+      this.fx.toast('Şu an saklı vida yok, büyüteci sakla!');
+      return false;
+    }
+    lv.xrayUntil = this.clock + 6000;
+    this.sound.playBooster();
+    this.fx.toast(`🔍 ${hidden} saklı vida görünüyor`, 'good', 1800);
+    return true;
+  }
 
-      this.sendScrewToBox(screw, activeBox, () => {
-        this.checkBufferAutofill(callback);
-      });
+  undo() {
+    const lv = this.lv;
+    if (lv.inFlight > 0) return false;
+    const entry = lv.history.pop();
+    if (!entry) {
+      this.fx.toast('Geri alınacak hamle yok (kapanan kutu geri açılmaz).');
+      return false;
+    }
+    const { screw, target } = entry;
+    if (target.type === 'box') {
+      target.box.filled--;
+      target.box.reserved--;
     } else {
-      if (callback) callback();
+      lv.tray[target.idx] = null;
     }
+    // Restore plates exactly as they were
+    entry.poses.forEach(ps => {
+      const p = ps.p;
+      if (p.cleared && !ps.cleared) Matter.Composite.add(this.engine.world, p.body);
+      p.cleared = ps.cleared;
+      p.falling = ps.falling;
+      if (!p.body.isStatic) {
+        Matter.Body.setVelocity(p.body, { x: 0, y: 0 });
+        Matter.Body.setAngularVelocity(p.body, 0);
+      }
+      Matter.Body.setPosition(p.body, { x: ps.x, y: ps.y });
+      Matter.Body.setAngle(p.body, ps.angle);
+    });
+    screw.state = 'board';
+    screw.anim = null;
+    screw.constraints.forEach(c => Matter.Composite.add(this.engine.world, c));
+    this.updatePlates(true);
+    lv.combo = entry.combo;
+    if (entry.gears) {
+      this.save.gears -= entry.gears;
+      lv.gearsEarned -= entry.gears;
+    }
+    this.sound.playBooster();
+    this.renderer.spawnRing(screw.x, screw.y, 'rgba(168,204,232,0.9)', 40);
+    this.syncBoxes();
+    this.syncTray();
+    this.updateCurrencyUI();
+    return true;
   }
 
-  // ==========================================
-  // WIN / LOSE & DOPAMINE CHEST REWARD
-  // ==========================================
-
-  checkBoardState() {
-    // 1. Check Win
-    if (this.boxes.length === 0 || this.screws.length === 0) {
-      const remainingInBuffer = this.bufferSlots.filter(s => s !== null).length;
-      if (remainingInBuffer === 0 || this.screws.length === 0) {
-        this.triggerVictory();
-        return;
-      }
-    }
-
-    // 2. Softlock: screws remain but none can be tapped (falling plates get time to clear first)
-    if (this.screws.length > 0 && this.screws.every(s => this.isScrewBlocked(s))) {
-      clearTimeout(this._stuckTimeout);
-      this._stuckTimeout = setTimeout(() => {
-        if (this.isVictory || this.isAnimating || this.screws.length === 0) return;
-        // A plate with no screws left is still falling (or the app is paused) → check again later
-        const falling = this.plates.some(p => !p.isCleared && !this.screws.some(s => s.plates.includes(p.id)));
-        if (falling || document.hidden) {
-          this.checkBoardState();
-        } else if (this.screws.every(s => this.isScrewBlocked(s))) {
-          this.triggerGameOver();
-        }
-      }, 2500);
-    }
-
-    // 3. Check Game Over
-    const freeBufferIndex = this.bufferSlots.indexOf(null);
-    if (freeBufferIndex === -1) {
-      const activeBox = this.boxes[0];
-      let hasMatchingScrewAvailable = false;
-
-      for (const screw of this.screws) {
-        if (screw.color === activeBox.color && !this.isScrewBlocked(screw)) {
-          hasMatchingScrewAvailable = true;
-          break;
-        }
-      }
-
-      if (!hasMatchingScrewAvailable) {
-        this.triggerGameOver();
-      }
-    }
+  updateBoosterUI() {
+    const lv = this.lv;
+    const set = (kind, n) => {
+      const badge = this.$(`cnt-${kind}`);
+      badge.textContent = n > 0 ? n : '+';
+      badge.classList.toggle('empty', n <= 0);
+    };
+    set('magnet', this.save.boosters.magnet);
+    set('slot', this.save.boosters.slot);
+    set('loupe', this.save.boosters.loupe);
+    set('undo', lv ? lv.undoLeft : 0);
   }
 
-  triggerVictory() {
-    if (this.isVictory) return;
-    this.isVictory = true;
-    this.chestOpened = false;
-    window.soundEngine.playVictory();
+  openOffer(kind) {
+    const info = BOOSTER_INFO[kind];
+    this._offerKind = kind;
+    this.$('offer-icon').textContent = info.icon;
+    this.$('offer-title').textContent = info.title;
+    this.$('offer-desc').textContent = info.desc;
+    const amount = kind === 'undo' ? 2 : 1;
+    this.$('offer-ad-label').textContent = `Reklam izle · +${amount}`;
+    this.$('offer-gears-label').textContent = `${PRICES[kind]} ⚙️ · +${amount}`;
+    this.$('btn-offer-ad').disabled = !this.ads.isAvailable(kind === 'undo' ? 'undo' : 'booster');
+    this.$('btn-offer-gears').disabled = this.save.gears < PRICES[kind];
+    this.openModal('modal-offer');
+  }
 
-    // Reset Mystery Chest UI in modal
-    const chestBtn = document.getElementById('btn-open-chest');
-    const chestRewards = document.getElementById('chest-opened-rewards');
-    if (chestBtn) chestBtn.style.display = 'flex';
-    if (chestRewards) chestRewards.classList.add('hidden');
+  async buyOffer(how) {
+    const kind = this._offerKind;
+    const amount = kind === 'undo' ? 2 : 1;
+    if (how === 'ad') {
+      const ok = await this.ads.showRewarded(kind === 'undo' ? 'undo' : 'booster');
+      if (!ok) return;
+    } else {
+      if (this.save.gears < PRICES[kind]) return;
+      this.save.gears -= PRICES[kind];
+    }
+    if (kind === 'undo') {
+      if (this.lv) this.lv.undoLeft += amount;
+    } else {
+      this.save.boosters[kind] += amount;
+    }
+    this.store.save();
+    this.closeModal('modal-offer');
+    this.updateBoosterUI();
+    this.updateCurrencyUI();
+    const btn = this.$(`btn-${kind}`);
+    if (btn) {
+      this.fx.burst(btn, { count: 14, spread: 60 });
+      this.fx.bump(btn);
+    }
+    this.sound.playBooster();
+  }
 
-    // Calculate Stars
-    const star1 = true;
-    const star2 = (this.maxBufferOccupiedThisLevel <= 3);
-    const star3 = (this.maxComboThisLevel >= 2);
+  // ==========================================================
+  // VICTORY & REWARDS
+  // ==========================================================
+  victory() {
+    const lv = this.lv;
+    if (lv.ended) return;
+    lv.ended = true;
+    const s = this.save;
+    const level = lv.level;
+    const stars = 1 + (lv.revived ? 0 : 1) + (!lv.revived && lv.peakTray <= level.starTray ? 1 : 0);
+    const prev = s.levelStars[lv.n] || 0;
+    const newStars = Math.max(0, stars - prev);
+    s.levelStars[lv.n] = Math.max(prev, stars);
+    s.stars += newStars;
+    s.starsEarned += newStars;
+    s.level = Math.max(s.level, lv.n + 1);
+    s.stats.wins++;
 
-    const starEls = [
-      document.getElementById('star-1'),
-      document.getElementById('star-2'),
-      document.getElementById('star-3')
-    ];
+    let gears = 20 + stars * 10;
+    if (this.workshop.has('bench')) gears = Math.round(gears * 1.15);
+    s.gears += gears;
 
+    let artifact = null;
+    if (level.job.artifactId && !s.artifacts.includes(level.job.artifactId)) {
+      artifact = window.Levels.ARTIFACTS.find(a => a.id === level.job.artifactId);
+      s.artifacts.push(artifact.id);
+      if (!s.vitrinClaimAt) s.vitrinClaimAt = Date.now();
+    }
+    this.store.save();
+
+    this.sound.playVictory();
+    for (let i = 0; i < 6; i++) {
+      this.after(i * 120, () => this.renderer.spawnSparks(80 + Math.random() * 240, 140 + Math.random() * 240,
+        i % 2 ? '#ffd700' : '#9cb8d4', 26, { speed: 1.4 }));
+    }
+    this.after(900, () => this.showVictory({ stars, newStars, gears, artifact, replay: prev > 0 && newStars === 0 }));
+  }
+
+  showVictory({ stars, newStars, gears, artifact, replay }) {
+    const lv = this.lv;
+    const s = this.save;
+    const level = lv ? lv.level : null;
+    this.$('victory-item').textContent = level.job.item;
+    this.$('victory-thanks').textContent = level.masterpiece
+      ? 'Şaheser yeniden hayat buldu! Koleksiyon vitrinine yerleştirildi.'
+      : `${level.job.customer} çok memnun kaldı. Ellerine sağlık!`;
+    this.$('victory-stars-total').textContent = s.stars - newStars;
+    this.$('victory-gears-total').textContent = s.gears - gears;
+    const starEls = [1, 2, 3].map(i => this.$(`vstar-${i}`));
     starEls.forEach(el => el.classList.remove('stamped'));
+    this.$('victory-reward-stars').textContent = `+${newStars}`;
+    this.$('victory-reward-gears').textContent = `+${gears}`;
+    this.$('victory-rewards').classList.add('hidden');
+    this.$('victory-best').classList.toggle('hidden', !replay);
 
-    // Sequential Star Stamps with Audio
-    setTimeout(() => {
-      starEls[0].classList.add('stamped');
-      window.soundEngine.playStarStamp(0);
-    }, 400);
-
-    if (star2) {
-      setTimeout(() => {
-        starEls[1].classList.add('stamped');
-        window.soundEngine.playStarStamp(1);
-      }, 850);
+    const banner = this.$('victory-artifact');
+    banner.classList.toggle('hidden', !artifact);
+    if (artifact) {
+      this.$('victory-artifact-icon').textContent = artifact.icon;
+      this.$('victory-artifact-title').textContent = `${artifact.title} vitrine kondu!`;
+      this.$('victory-artifact-desc').textContent = `Vitrin geliri: saatte +${artifact.rate} ⚙️`;
     }
 
-    if (star3) {
-      setTimeout(() => {
-        starEls[2].classList.add('stamped');
-        window.soundEngine.playStarStamp(2);
-      }, 1300);
+    // Chest resets
+    this._chest = null;
+    this.$('btn-chest').classList.remove('hidden', 'opened');
+    this.$('chest-rewards').classList.add('hidden');
+    this.$('btn-chest-double').classList.add('hidden');
+
+    this.renderNextTaskProgress();
+    this.openModal('modal-victory');
+
+    // Star stamps → rewards fly into the totals
+    for (let i = 0; i < stars; i++) {
+      this.afterReal(350 + i * 380, () => {
+        starEls[i].classList.add('stamped');
+        this.sound.playStarStamp(i);
+        this.fx.burst(starEls[i], { count: 10, spread: 50 });
+      });
     }
-
-    document.getElementById('victory-part-name').textContent = this.levelData.partName;
-
-    // Check Museum Unlock
-    const currentArtifactId = this.currentLevelIndex + 1;
-    if (currentArtifactId <= window.MUSEUM_ARTIFACTS.length) {
-      if (!this.unlockedMuseum.includes(currentArtifactId)) {
-        this.unlockedMuseum.push(currentArtifactId);
-        localStorage.setItem('chronomaster_museum', JSON.stringify(this.unlockedMuseum));
+    this.afterReal(450 + stars * 380, () => {
+      this.$('victory-rewards').classList.remove('hidden');
+      if (newStars > 0) {
+        this.fx.fly({ from: this.$('victory-reward-stars'), to: this.$('victory-stars-pill'), html: '⭐', count: newStars, size: 24, stagger: 160,
+          onEach: i => { this.sound.playStarCollect(i); this.$('victory-stars-total').textContent = s.stars - newStars + i + 1; this.fx.bump(this.$('victory-stars-pill')); },
+          onDone: () => this.renderNextTaskProgress(true) });
       }
-      const art = window.MUSEUM_ARTIFACTS[currentArtifactId - 1];
-      document.getElementById('victory-artifact-title').textContent = `${art.icon} ${art.title} Restorasyonu Tamam!`;
-      document.getElementById('victory-artifact-desc').textContent = `${art.category} müzeye yerleştirildi. Pasif gelir: +${art.passiveRate} ⚙️/dk.`;
-      document.getElementById('victory-unlock-badge').classList.remove('hidden');
+      this.fx.fly({ from: this.$('victory-reward-gears'), to: this.$('victory-gears-pill'), html: '⚙️', count: 7, size: 20, stagger: 60,
+        onEach: i => this.sound.playCoin(i),
+        onDone: () => { this.fx.countUp(this.$('victory-gears-total'), s.gears - gears, s.gears, 500); this.fx.bump(this.$('victory-gears-pill')); } });
+    });
+  }
+
+  renderNextTaskProgress(animate = false) {
+    const t = this.workshop.nextTask();
+    const card = this.$('victory-next');
+    const btnTask = this.$('btn-victory-task');
+    const btnNext = this.$('btn-victory-next');
+    if (!t) {
+      card.classList.add('hidden');
+      btnTask.classList.add('hidden');
+      btnNext.classList.remove('secondary-look');
+      return;
+    }
+    const have = this.save.stars;
+    const ready = have >= t.cost;
+    card.classList.remove('hidden');
+    card.classList.toggle('ready', ready);
+    this.$('victory-next-icon').textContent = t.icon;
+    this.$('victory-next-title').textContent = ready ? `${t.title} — hazır!` : `Sıradaki onarım: ${t.title}`;
+    this.$('victory-next-count').textContent = `⭐ ${Math.min(have, t.cost)}/${t.cost}`;
+    this.$('victory-next-fill').style.width = `${Math.min(100, (have / t.cost) * 100)}%`;
+    btnTask.classList.toggle('hidden', !ready);
+    btnNext.classList.toggle('secondary-look', ready);
+    if (animate && ready) {
+      this.fx.bump(card, 'ready-pop');
+      this.sound.playBoxComplete();
+    }
+  }
+
+  openChest() {
+    if (this._chest) return;
+    const cabinet = this.workshop.has('cabinet');
+    let gears = 40 + Math.floor(Math.random() * 50);
+    if (cabinet) gears = Math.round(gears * 1.5);
+    const boosterRoll = Math.random() < (cabinet ? 0.9 : 0.45);
+    const kinds = ['magnet', 'slot', 'loupe'];
+    const booster = boosterRoll ? kinds[Math.floor(Math.random() * kinds.length)] : null;
+    this._chest = { gears, booster, doubled: false };
+    this.save.gears += gears;
+    if (booster) this.save.boosters[booster]++;
+    this.store.save();
+
+    this.sound.playChestOpen();
+    const chestBtn = this.$('btn-chest');
+    chestBtn.classList.add('opened');
+    this.fx.burst(chestBtn, { count: 30, spread: 130 });
+    this.afterReal(350, () => {
+      chestBtn.classList.add('hidden');
+      this.$('chest-gears').textContent = `+${gears}`;
+      const bp = this.$('chest-booster');
+      bp.classList.toggle('hidden', !booster);
+      if (booster) bp.innerHTML = `<span>${BOOSTER_INFO[booster].icon}</span> +1 ${BOOSTER_INFO[booster].title}`;
+      this.$('chest-rewards').classList.remove('hidden');
+      this.fx.fly({ from: this.$('chest-gears'), to: this.$('victory-gears-pill'), html: '⚙️', count: 6, size: 20,
+        onEach: i => this.sound.playCoin(i),
+        onDone: () => this.fx.countUp(this.$('victory-gears-total'), this.save.gears - gears, this.save.gears, 400) });
+      const dbl = this.$('btn-chest-double');
+      dbl.classList.toggle('hidden', !this.ads.isAvailable('double'));
+      dbl.disabled = false;
+    });
+  }
+
+  async doubleChest() {
+    const c = this._chest;
+    if (!c || c.doubled) return;
+    const ok = await this.ads.showRewarded('double');
+    if (!ok) return;
+    c.doubled = true;
+    this.save.gears += c.gears;
+    if (c.booster) this.save.boosters[c.booster]++;
+    this.store.save();
+    this.$('btn-chest-double').classList.add('hidden');
+    this.$('chest-gears').textContent = `+${c.gears * 2}`;
+    this.fx.burst(this.$('chest-rewards'), { count: 30, spread: 140 });
+    this.sound.playChestOpen();
+    this.fx.fly({ from: this.$('chest-gears'), to: this.$('victory-gears-pill'), html: '⚙️', count: 8, size: 20,
+      onEach: i => this.sound.playCoin(i),
+      onDone: () => this.fx.countUp(this.$('victory-gears-total'), this.save.gears - c.gears, this.save.gears, 400) });
+  }
+
+  // ==========================================================
+  // WORKSHOP
+  // ==========================================================
+  async onWorkshopTask(taskId) {
+    const t = this.workshop.allTasks().find(x => x.id === taskId);
+    if (!t || this.workshop.busy) return;
+    if (!this.workshop.canAfford(t)) {
+      const missing = t.cost - this.save.stars;
+      this.workshop.say(`Bunun için ${missing} yıldız daha lazım. Bir iş daha bitirelim!`, 3200);
+      this.fx.bump(this.$('btn-play'), 'bump');
+      return;
+    }
+    await this.workshop.restore(taskId);
+    this.updateHomeUI();
+  }
+
+  showChapterComplete(ch) {
+    const s = this.save;
+    s.gears += ch.reward.gears;
+    Object.entries(ch.reward.boosters || {}).forEach(([k, v]) => { s.boosters[k] += v; });
+    this.store.save();
+    this.$('chapter-title').textContent = `Bölüm ${ch.id} tamam: ${ch.title}`;
+    this.$('chapter-rank').textContent = ch.rank.toUpperCase();
+    this.$('chapter-text').textContent = ch.done;
+    const items = [`<div class="reward-pill">⚙️ +${ch.reward.gears}</div>`]
+      .concat(Object.entries(ch.reward.boosters || {}).map(([k, v]) => `<div class="reward-pill highlight">${BOOSTER_INFO[k].icon} +${v}</div>`));
+    this.$('chapter-rewards').innerHTML = items.join('');
+    const next = WORKSHOP_CHAPTERS.find(c => c.id === ch.id + 1);
+    this.$('chapter-next').textContent = next ? `Sıradaki bölüm: ${next.title}` : 'Tüm atölye yenilendi! Siparişler ve şaheserler seni bekliyor.';
+    this.sound.playFanfare();
+    this.openModal('modal-chapter');
+    this.fx.burst(this.$('chapter-rank'), { count: 40, spread: 170 });
+    this.updateHomeUI();
+  }
+
+  // ==========================================================
+  // DAILY REWARD
+  // ==========================================================
+  dailyAvailable() {
+    return this.save.daily.last !== SaveStore.today();
+  }
+
+  dailyIndex() {
+    const d = this.save.daily;
+    const gap = SaveStore.dayDiff(d.last, SaveStore.today());
+    if (gap === 1) return d.streak % DAILY_REWARDS.length;
+    return 0; // first claim or streak broken
+  }
+
+  openDaily() {
+    const avail = this.dailyAvailable();
+    const idx = avail ? this.dailyIndex() : (this.save.daily.streak - 1) % DAILY_REWARDS.length;
+    this.$('daily-grid').innerHTML = DAILY_REWARDS.map((r, i) => {
+      const state = i < idx || (!avail && i === idx) ? 'claimed' : i === idx ? 'today' : '';
+      return `<div class="daily-cell ${state} ${i === 6 ? 'big' : ''}">
+        <span class="daily-day">${i + 1}. gün</span>
+        <span class="daily-icon">${this.rewardIcon(r)}</span>
+        <span class="daily-label">${this.rewardText(r)}</span>
+      </div>`;
+    }).join('');
+    this.$('btn-daily-claim').disabled = !avail;
+    this.$('btn-daily-claim').textContent = avail ? 'AL' : 'Yarın tekrar gel';
+    this.$('btn-daily-double').classList.toggle('hidden', !avail || !this.ads.isAvailable('daily'));
+    this.openModal('modal-daily');
+  }
+
+  rewardIcon(r) {
+    if (r.stars) return '🎁';
+    if (r.boosters) return Object.keys(r.boosters).map(k => BOOSTER_INFO[k].icon).join('');
+    return '⚙️';
+  }
+
+  rewardText(r) {
+    const parts = [];
+    if (r.gears) parts.push(`${r.gears} ⚙️`);
+    if (r.stars) parts.push(`${r.stars} ⭐`);
+    if (r.boosters) Object.entries(r.boosters).forEach(([k, v]) => parts.push(`${v} ${BOOSTER_INFO[k].title}`));
+    return parts.join(' + ');
+  }
+
+  grant(r, mult = 1) {
+    const s = this.save;
+    if (r.gears) s.gears += r.gears * mult;
+    if (r.stars) { s.stars += r.stars * mult; s.starsEarned += r.stars * mult; }
+    if (r.boosters) Object.entries(r.boosters).forEach(([k, v]) => { s.boosters[k] += v * mult; });
+  }
+
+  async claimDaily(doubled) {
+    if (!this.dailyAvailable()) return;
+    if (doubled) {
+      const ok = await this.ads.showRewarded('daily');
+      if (!ok) return;
+    }
+    const idx = this.dailyIndex();
+    const r = DAILY_REWARDS[idx];
+    this.grant(r, doubled ? 2 : 1);
+    this.save.daily = { last: SaveStore.today(), streak: idx + 1 };
+    this.store.save();
+    this.sound.playChestOpen();
+    const cell = this.$('daily-grid').children[idx];
+    if (cell) this.fx.burst(cell, { count: 26, spread: 110 });
+    this.fx.toast(`${doubled ? '2 kat! ' : ''}${this.rewardText(r)}${doubled ? ' ×2' : ''} alındı`, 'good');
+    this.afterReal(700, () => {
+      this.closeModal('modal-daily');
+      this.updateHomeUI();
+    });
+  }
+
+  // ==========================================================
+  // MASTER'S GIFT (rewarded ad on a cooldown)
+  // ==========================================================
+  giftCooldownMs() {
+    return (this.workshop.has('counter') ? GIFT_COOLDOWN_H / 2 : GIFT_COOLDOWN_H) * 3600 * 1000;
+  }
+
+  updateGiftUI() {
+    const left = this.save.giftAt - Date.now();
+    const btn = this.$('btn-gift');
+    const label = this.$('gift-timer');
+    if (left <= 0) {
+      btn.classList.add('ready');
+      label.textContent = 'HAZIR';
     } else {
-      document.getElementById('victory-unlock-badge').classList.add('hidden');
-    }
-
-    document.getElementById('modal-victory').classList.remove('hidden');
-
-    // Confetti particles
-    for (let i = 0; i < 45; i++) {
-      this.renderer.spawnSparks(200, 260, i % 2 === 0 ? '#ffd700' : '#4a6984', 24);
+      btn.classList.remove('ready');
+      const mins = Math.ceil(left / 60000);
+      const h = Math.floor(mins / 60);
+      const m = mins % 60;
+      label.textContent = h > 0 ? `${h}s ${m}dk` : `${m}dk`;
     }
   }
 
-  openVictoryChest() {
-    if (this.chestOpened) return;
-    this.chestOpened = true;
-
-    window.soundEngine.playChestOpen();
-
-    const chestBtn = document.getElementById('btn-open-chest');
-    const chestRewards = document.getElementById('chest-opened-rewards');
-    chestBtn.style.display = 'none';
-    chestRewards.classList.remove('hidden');
-
-    let gearReward = 85 + Math.floor(Math.random() * 40);
-    // Workshop Perk: Mahogany Bench (+15% Level Complete gear bonus)
-    if (this.unlockedWorkshop.includes('bench')) {
-      gearReward = Math.round(gearReward * 1.15);
+  async claimGift() {
+    if (this.save.giftAt > Date.now()) {
+      this.workshop.say('Hediyemi biraz sonra hazırlarım, sabırlı ol evlat.', 2600);
+      return;
     }
-    // Workshop Perk: Royal Cabinet (+50% Chest rewards)
-    if (this.unlockedWorkshop.includes('cabinet')) {
-      gearReward = Math.round(gearReward * 1.5);
-    }
-
-    this.gears += gearReward;
-    localStorage.setItem('chronomaster_gears', this.gears);
-    document.getElementById('gear-count').textContent = this.gears;
-    document.getElementById('reward-gears-amount').textContent = `+${gearReward}`;
-
-    const boosterPill = document.getElementById('reward-booster-pill');
-    const boosterChance = this.unlockedWorkshop.includes('cabinet') ? 0.95 : 0.45;
-    if (Math.random() < boosterChance) {
-      this.boosters.magnet++;
-      this.updateBoosterUI();
-      boosterPill.innerHTML = '<span class="reward-icon">🧲</span> +1 Mıknatıs';
-      boosterPill.style.display = 'flex';
-    } else {
-      boosterPill.style.display = 'none';
-    }
-
-    this.renderer.spawnSparks(200, 260, '#ffd700', 35);
+    const ok = await this.ads.showRewarded('gift');
+    if (!ok) return;
+    const roll = Math.random();
+    const r = roll < 0.5 ? { gears: 60 + Math.floor(Math.random() * 90) }
+      : roll < 0.8 ? { boosters: { [['magnet', 'slot', 'loupe'][Math.floor(Math.random() * 3)]]: 1 } }
+        : { gears: 50, boosters: { magnet: 1 } };
+    this.grant(r);
+    this.save.giftAt = Date.now() + this.giftCooldownMs();
+    this.store.save();
+    this.sound.playChestOpen();
+    this.fx.burst(this.$('btn-gift'), { count: 24, spread: 100 });
+    this.workshop.say(`Al bakalım: ${this.rewardText(r)}. Hak ettin!`, 3000);
+    this.updateHomeUI();
   }
 
-  triggerGameOver() {
-    if (this.isGameOver) return;
-    this.isGameOver = true;
-    window.soundEngine.playGameOver();
-    document.getElementById('modal-gameover').classList.remove('hidden');
+  // ==========================================================
+  // VITRIN (collection + passive income)
+  // ==========================================================
+  vitrinRate() {
+    const rate = this.save.artifacts
+      .map(id => window.Levels.ARTIFACTS.find(a => a.id === id))
+      .reduce((sum, a) => sum + (a ? a.rate : 0), 0);
+    return this.workshop.has('grandclock') ? rate * 2 : rate;
   }
 
-  // ==========================================
-  // ROYAL HOROLOGY MUSEUM (META GAME PROGRESSION)
-  // ==========================================
+  vitrinIncome() {
+    const rate = this.vitrinRate();
+    if (!rate || !this.save.vitrinClaimAt) return { rate, amount: 0 };
+    const hours = Math.min(VITRIN_CAP_H, Math.max(0, (Date.now() - this.save.vitrinClaimAt) / 3600000));
+    return { rate, amount: Math.floor(hours * rate) };
+  }
 
-  openMuseumModal() {
-    const gallery = document.getElementById('museum-gallery');
-    gallery.innerHTML = '';
-
-    const artifacts = window.MUSEUM_ARTIFACTS;
-    const unlockedIds = this.unlockedMuseum;
-
-    document.getElementById('museum-count').textContent = `${unlockedIds.length} / ${artifacts.length}`;
-
-    const minutesElapsed = Math.min(120, Math.floor((Date.now() - this.lastMuseumClaim) / 60000));
-    let totalRate = 0;
-
-    artifacts.forEach(art => {
-      const isUnlocked = unlockedIds.includes(art.id);
-      if (isUnlocked) totalRate += art.passiveRate;
-
-      const card = document.createElement('div');
-      card.className = `artifact-card ${isUnlocked ? 'unlocked' : 'locked'}`;
-
-      card.innerHTML = `
-        <div class="artifact-icon-wrap">${isUnlocked ? art.icon : '🔒'}</div>
+  openVitrin() {
+    const owned = this.save.artifacts;
+    const inc = this.vitrinIncome();
+    this.$('vitrin-count').textContent = `${owned.length} / ${window.Levels.ARTIFACTS.length}`;
+    this.$('vitrin-rate').textContent = `${inc.rate} ⚙️/saat`;
+    this.$('vitrin-amount').textContent = `+${inc.amount} ⚙️`;
+    this.$('btn-vitrin-claim').disabled = inc.amount < 1;
+    this.$('btn-vitrin-double').classList.toggle('hidden', inc.amount < 1 || !this.ads.isAvailable('vitrin'));
+    this.$('vitrin-gallery').innerHTML = window.Levels.ARTIFACTS.map((a, i) => {
+      const has = owned.includes(a.id);
+      const lvl = (i + 1) * window.Levels.MASTERPIECE_EVERY;
+      return `<div class="artifact-card ${has ? 'unlocked' : 'locked'}">
+        <div class="artifact-icon-wrap">${has ? a.icon : '🔒'}</div>
         <div class="artifact-info">
-          <div class="artifact-title-row">
-            <span class="artifact-name">${art.title}</span>
-            <span class="artifact-year">${isUnlocked ? art.year : `Seviye ${art.requiredLevel}`}</span>
-          </div>
-          <div class="artifact-category">${art.category}</div>
-          <p class="artifact-desc">${isUnlocked ? art.desc : 'Bu tarihi eseri müzeye kazandırmak için atölyede restorasyonu tamamlayın.'}</p>
-          ${isUnlocked ? `<div class="artifact-passive">⚙️ +${art.passiveRate} Dişli / Dk</div>` : ''}
-        </div>
-      `;
-
-      gallery.appendChild(card);
-    });
-
-    // Workshop Perk: London Longcase Clock doubles museum passive rate
-    if (this.unlockedWorkshop.includes('clock')) {
-      totalRate *= 2;
-    }
-
-    const pendingGears = Math.max(0, minutesElapsed * totalRate);
-    document.getElementById('museum-income').textContent = `+${pendingGears} ⚙️`;
-    const claimBtn = document.getElementById('btn-claim-museum');
-    claimBtn.disabled = (pendingGears <= 0);
-
-    document.getElementById('modal-museum').classList.remove('hidden');
+          <div class="artifact-title-row"><span class="artifact-name">${has ? a.title : '???'}</span>
+          <span class="artifact-year">${has ? a.year : `Seviye ${lvl}`}</span></div>
+          <div class="artifact-category">${a.category}</div>
+          <p class="artifact-desc">${has ? a.desc : `${lvl}. seviyedeki şaheser restorasyonunu tamamla.`}</p>
+          ${has ? `<div class="artifact-passive">⚙️ +${a.rate}/saat</div>` : ''}
+        </div></div>`;
+    }).join('');
+    this.openModal('modal-vitrin');
   }
 
-  claimMuseumIncome() {
-    const artifacts = window.MUSEUM_ARTIFACTS;
-    let totalRate = 0;
-    artifacts.forEach(art => {
-      if (this.unlockedMuseum.includes(art.id)) totalRate += art.passiveRate;
-    });
-
-    // Workshop Perk: London Longcase Clock doubles museum passive rate
-    if (this.unlockedWorkshop.includes('clock')) {
-      totalRate *= 2;
+  async claimVitrin(doubled) {
+    const inc = this.vitrinIncome();
+    if (inc.amount < 1) return;
+    if (doubled) {
+      const ok = await this.ads.showRewarded('vitrin');
+      if (!ok) return;
     }
-
-    const minutesElapsed = Math.min(120, Math.floor((Date.now() - this.lastMuseumClaim) / 60000));
-    const pendingGears = Math.max(0, minutesElapsed * totalRate);
-
-    if (pendingGears > 0) {
-      this.gears += pendingGears;
-      this.lastMuseumClaim = Date.now();
-      localStorage.setItem('chronomaster_gears', this.gears);
-      localStorage.setItem('chronomaster_last_claim', this.lastMuseumClaim);
-
-      document.getElementById('gear-count').textContent = this.gears;
-      document.getElementById('museum-income').textContent = `+0 ⚙️`;
-      document.getElementById('btn-claim-museum').disabled = true;
-
-      window.soundEngine.playBooster();
-      this.renderer.spawnFloatingText(200, 200, `+${pendingGears} ⚙️ MÜZE GELİRİ ALINDI!`, '#ffd700');
-    }
+    const amount = inc.amount * (doubled ? 2 : 1);
+    this.save.gears += amount;
+    this.save.vitrinClaimAt = Date.now();
+    this.store.save();
+    this.sound.playChestOpen();
+    this.fx.fly({ from: this.$('vitrin-amount'), to: this.$('vitrin-gears-pill'), html: '⚙️', count: 8, size: 20,
+      onEach: i => this.sound.playCoin(i),
+      onDone: () => this.fx.countUp(this.$('vitrin-gears'), this.save.gears - amount, this.save.gears, 400) });
+    this.$('vitrin-amount').textContent = '+0 ⚙️';
+    this.$('btn-vitrin-claim').disabled = true;
+    this.$('btn-vitrin-double').classList.add('hidden');
+    this.updateHomeUI();
   }
 
-  // ==========================================
-  // OPTION 3: WORKSHOP MAKEOVER (SAATÇİ DÜKKANI YENİLEME)
-  // ==========================================
+  // ==========================================================
+  // PAUSE & SETTINGS
+  // ==========================================================
+  openPause() {
+    if (!this.lv || this.lv.ended) return;
+    this.$('pause-sound').textContent = this.save.settings.sound ? '🔊 Ses: Açık' : '🔇 Ses: Kapalı';
+    this.openModal('modal-pause');
+  }
 
-  openWorkshopModal() {
-    const listEl = document.getElementById('workshop-upgrades-list');
-    listEl.innerHTML = '';
+  openSettings() {
+    this.syncSettingsUI();
+    this.$('set-version').textContent = `Sürüm ${APP_VERSION}`;
+    this.$('set-adprivacy').classList.toggle('hidden', !this.ads.native);
+    this.openModal('modal-settings');
+  }
 
-    const upgrades = window.WORKSHOP_UPGRADES || [];
-    const count = this.unlockedWorkshop.length;
-    const total = upgrades.length;
-    const pct = Math.round((count / total) * 100);
+  syncSettingsUI() {
+    const s = this.save.settings;
+    [['sound', 'set-sound'], ['ambience', 'set-ambience'], ['haptics', 'set-haptics']].forEach(([k, id]) => {
+      const el = this.$(id);
+      if (el) el.classList.toggle('on', !!s[k]);
+    });
+    const ps = this.$('pause-sound');
+    if (ps) ps.textContent = s.sound ? '🔊 Ses: Açık' : '🔇 Ses: Kapalı';
+  }
 
-    const progressBadge = document.getElementById('workshop-progress-badge');
-    if (progressBadge) {
-      progressBadge.textContent = `Atölye Durumu: %${pct} Yenilendi (${count}/${total})`;
-    }
-    const availGears = document.getElementById('workshop-available-gears');
-    if (availGears) {
-      availGears.textContent = this.gears;
-    }
+  toggleSetting(key) {
+    const s = this.save.settings;
+    s[key] = !s[key];
+    this.store.save();
+    this.sound.setMuted(!s.sound);
+    this.sound.hapticsOn = !!s.haptics;
+    if (s.ambience && s.sound) this.sound.startClockworkAmbience();
+    else this.sound.stopClockworkAmbience();
+    if (key === 'haptics' && s.haptics) this.sound.vibrate([30]);
+    this.syncSettingsUI();
+  }
 
-    // Update Room Diorama Visuals
-    upgrades.forEach(up => {
-      const slotEl = document.getElementById(`room-slot-${up.id}`);
-      if (slotEl) {
-        const isUnlocked = this.unlockedWorkshop.includes(up.id);
-        if (isUnlocked) {
-          slotEl.classList.add('unlocked');
-          const visual = slotEl.querySelector('.slot-visual');
-          if (visual) visual.textContent = up.icon;
-          const badge = slotEl.querySelector('.slot-badge');
-          if (badge) badge.textContent = 'Yenilendi ✨';
-        } else {
-          slotEl.classList.remove('unlocked');
-          const visual = slotEl.querySelector('.slot-visual');
-          if (visual) visual.textContent = up.beforeIcon || '🏚️';
-          const badge = slotEl.querySelector('.slot-badge');
-          if (badge) badge.textContent = 'Eski Durum';
-        }
+  // ==========================================================
+  // UI SYNC: boxes & tray
+  // ==========================================================
+  syncBoxes() {
+    const lv = this.lv;
+    const track = this.$('boxes-track');
+    const visible = lv.boxes.filter(b => !b.done);
+    const shown = visible.slice(0, 3);
+    const active = this.activeBox();
+    const want = new Set(shown.map(b => `box-${b.id}`));
+    [...track.children].forEach(el => { if (!want.has(el.id) && !el.classList.contains('more-pill')) el.remove(); });
+
+    shown.forEach((box, i) => {
+      let el = this.$(`box-${box.id}`);
+      const info = window.Levels.SCREW_TYPES[box.color];
+      if (!el) {
+        el = document.createElement('div');
+        el.id = `box-${box.id}`;
+        el.className = 'screw-box enter';
+        el.style.setProperty('--box-color', info.hex);
+        el.innerHTML = `
+          <div class="box-header"><span class="box-label">${info.name.toUpperCase()}</span><span class="box-counter"></span></div>
+          <div class="box-slots-row">${[0, 1, 2].map(k => `<div class="box-hole" id="hole-${box.id}-${k}"></div>`).join('')}</div>`;
+        track.appendChild(el);
+      }
+      el.style.order = String(i);
+      el.classList.toggle('active', box === active || (box.filled < box.capacity && box.reserved >= box.capacity && i === 0));
+      el.classList.toggle('queued', box !== active && box.reserved < box.capacity);
+      el.querySelector('.box-counter').textContent = `${box.filled}/${box.capacity}`;
+      for (let k = 0; k < 3; k++) {
+        const hole = this.$(`hole-${box.id}-${k}`);
+        const filled = k < box.filled;
+        if (filled && !hole.firstChild) hole.innerHTML = `<div class="screw-icon ${info.colorClass}"></div>`;
+        if (!filled && hole.firstChild) hole.innerHTML = '';
+        hole.classList.toggle('filled', filled);
       }
     });
 
-    // Render Upgrade Cards
-    upgrades.forEach(up => {
-      const isUnlocked = this.unlockedWorkshop.includes(up.id);
-      const canAfford = this.gears >= up.cost;
-
-      const card = document.createElement('div');
-      card.className = `workshop-upgrade-card ${isUnlocked ? 'unlocked' : ''}`;
-
-      card.innerHTML = `
-        <div class="upgrade-icon-box">${isUnlocked ? up.icon : (up.beforeIcon || '🏚️')}</div>
-        <div class="upgrade-info">
-          <div class="upgrade-title-row">
-            <span class="upgrade-title">${up.title}</span>
-            <span class="upgrade-category">${up.category}</span>
-          </div>
-          <p class="upgrade-desc">${up.desc}</p>
-          <span class="upgrade-perk">✨ ${up.perk}</span>
-        </div>
-        <div class="upgrade-action">
-          ${isUnlocked ? `
-            <div class="badge-upgraded"><span>✅</span> YENİLENDİ</div>
-          ` : `
-            <button class="btn-buy-upgrade" data-upgrade-id="${up.id}" ${canAfford ? '' : 'disabled'}>
-              <span>⚙️</span> ${up.cost} YENİLE
-            </button>
-          `}
-        </div>
-      `;
-
-      listEl.appendChild(card);
-    });
-
-    // Bind buy buttons
-    listEl.querySelectorAll('.btn-buy-upgrade').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const upId = btn.getAttribute('data-upgrade-id');
-        this.buyWorkshopUpgrade(upId);
-      });
-    });
-
-    document.getElementById('modal-workshop').classList.remove('hidden');
-  }
-
-  buyWorkshopUpgrade(upgradeId) {
-    const upgrades = window.WORKSHOP_UPGRADES || [];
-    const up = upgrades.find(u => u.id === upgradeId);
-    if (!up || this.unlockedWorkshop.includes(upgradeId) || this.gears < up.cost) {
-      return;
+    let more = track.querySelector('.more-pill');
+    const rest = visible.length - shown.length;
+    if (rest > 0) {
+      if (!more) {
+        more = document.createElement('div');
+        more.className = 'more-pill';
+        track.appendChild(more);
+      }
+      more.style.order = '9';
+      more.textContent = `+${rest}`;
+    } else if (more) {
+      more.remove();
     }
-
-    this.gears -= up.cost;
-    this.unlockedWorkshop.push(upgradeId);
-
-    localStorage.setItem('chronomaster_gears', this.gears);
-    localStorage.setItem('chronomaster_workshop', JSON.stringify(this.unlockedWorkshop));
-
-    document.getElementById('gear-count').textContent = this.gears;
-    document.getElementById('menu-gears-count').textContent = this.gears;
-
-    window.soundEngine.playWorkshopUpgrade();
-    this.renderer.spawnSparks(200, 200, '#ffd700', 40);
-    this.renderer.spawnFloatingText(200, 160, `${up.title} Kuruldu! ✨`, '#ffd700');
-
-    this.openWorkshopModal();
   }
 
-  // ==========================================
-  // BOOSTERS
-  // ==========================================
-
-  useBoosterMagnet() {
-    if (this.boosters.magnet <= 0 || this.isAnimating) return;
-    const activeBox = this.boxes[0];
-    if (!activeBox) return;
-
-    const targetScrew = this.screws.find(s => s.color === activeBox.color);
-    if (!targetScrew) {
-      this.renderer.spawnFloatingText(200, 260, "Uyumlu Vida Yok!", "#ff4769");
-      return;
+  syncTray() {
+    const lv = this.lv;
+    const wrap = this.$('tray-slots');
+    while (wrap.children.length < lv.traySize) {
+      const i = wrap.children.length;
+      const hole = document.createElement('div');
+      hole.className = 'buffer-hole';
+      hole.id = `tray-${i}`;
+      wrap.appendChild(hole);
     }
-
-    this.boosters.magnet--;
-    this.updateBoosterUI();
-    window.soundEngine.playBooster();
-
-    this.renderer.spawnFloatingText(targetScrew.x, targetScrew.y, "MIKNATIS ÇEKTİ! 🧲", "#ffd700");
-
-    const constraints = this.screwConstraints.get(targetScrew.id) || [];
-    constraints.forEach(c => Matter.World.remove(this.engine.world, c));
-    this.screwConstraints.delete(targetScrew.id);
-    this.screws = this.screws.filter(s => s.id !== targetScrew.id);
-
-    this.updatePlatePhysicsStates();
-
-    const targetHole = document.getElementById(`hole-${activeBox.id}-${activeBox.filled}`);
-    this.animateFlyingScrew(targetScrew, targetScrew.x, targetScrew.y, targetHole, () => {
-      this.sendScrewToBox(targetScrew, activeBox, () => {
-        this.checkBoardState();
-      });
+    while (wrap.children.length > lv.traySize) wrap.lastChild.remove();
+    let occupied = 0;
+    lv.tray.forEach((slot, i) => {
+      const hole = this.$(`tray-${i}`);
+      if (slot) occupied++;
+      const show = slot && slot.state !== 'incoming';
+      const cls = show ? window.Levels.SCREW_TYPES[slot.screw.color].colorClass : '';
+      if (show && (!hole.firstChild || !hole.firstChild.classList.contains(cls))) {
+        hole.innerHTML = `<div class="screw-icon ${cls}"></div>`;
+      } else if (!show && hole.firstChild) {
+        hole.innerHTML = '';
+      }
+      hole.classList.toggle('occupied', !!slot);
+      hole.classList.toggle('leaving', !!slot && slot.state === 'leaving');
     });
+    this.$('tray-status').textContent = `${occupied} / ${lv.traySize}`;
+    const danger = lv.traySize - occupied <= 1;
+    this.$('tray-container').classList.toggle('danger', danger);
   }
 
-  addExtraBufferSlot(isBooster = false) {
-    if (isBooster) {
-      if (this.boosters.slot <= 0) return;
-      this.boosters.slot--;
-      this.updateBoosterUI();
-      window.soundEngine.playBooster();
-    }
-
-    this.maxBufferSlots++;
-    this.bufferSlots.push(null);
-    this.renderBufferUI();
-    this.renderer.spawnFloatingText(200, 480, "+1 YUVA AÇILDI! 🔓", "#38a169");
-  }
-
-  useBoosterNudge() {
-    if (this.boosters.nudge <= 0) return;
-    this.boosters.nudge--;
-    this.updateBoosterUI();
-    window.soundEngine.playBooster();
-
-    this.plateBodies.forEach(body => {
-      Matter.Body.setAngularVelocity(body, (Math.random() - 0.5) * 0.25);
-      Matter.Body.applyForce(body, body.position, {
-        x: (Math.random() - 0.5) * 0.05,
-        y: -0.05
-      });
-      Matter.Sleeping.set(body, false);
-    });
-
-    this.renderer.spawnFloatingText(200, 260, "SARSINTI! ⚡", "#ffd700");
-  }
-
-  undoLastMove() {
-    if (this.historyStack.length === 0 || this.isAnimating) return;
-    const lastMove = this.historyStack.pop();
-
-    window.soundEngine.playBooster();
-
-    lastMove.constraints.forEach(c => Matter.World.add(this.engine.world, c));
-    this.screwConstraints.set(lastMove.screw.id, lastMove.constraints);
-    this.screws.push(lastMove.screw);
-
-    if (lastMove.target === 'box') {
-      const activeBox = this.boxes[0];
-      if (activeBox && activeBox.filled > 0) {
-        activeBox.filled--;
-      }
-      this.renderBoxesUI();
-    } else {
-      this.bufferSlots[lastMove.bufferIndex] = null;
-      this.renderBufferUI();
-    }
-
-    this.updatePlatePhysicsStates();
-    this.renderer.spawnFloatingText(lastMove.screw.x, lastMove.screw.y, "GERİ ALINDI ↩️", "#a8cce8");
-  }
-
-  // ==========================================
-  // LEVEL SELECT DRAWER
-  // ==========================================
-
-  openLevelsModal() {
-    const grid = document.getElementById('levels-grid');
-    grid.innerHTML = '';
-
-    const totalLevels = Math.max(7, this.unlockedLevel + 1);
-
-    for (let i = 0; i < totalLevels; i++) {
-      const isLocked = (i + 1) > this.unlockedLevel;
-      const isCurrent = i === this.currentLevelIndex;
-
-      const card = document.createElement('div');
-      card.className = `level-card ${isLocked ? 'locked' : ''} ${isCurrent ? 'current' : ''}`;
-      card.innerHTML = `
-        <span class="level-card-num">${i + 1}</span>
-        <span class="level-card-stars">${isLocked ? '🔒' : '★★★'}</span>
-      `;
-
-      if (!isLocked) {
-        card.addEventListener('click', () => {
-          document.getElementById('modal-levels').classList.add('hidden');
-          document.getElementById('main-menu').classList.add('hidden');
-          this.loadLevel(i);
-        });
-      }
-
-      grid.appendChild(card);
-    }
-
-    document.getElementById('modal-levels').classList.remove('hidden');
-  }
-
-  // ==========================================
-  // OPTION 4: KINETIC GEARS & MECHANICAL TRIGGERS
-  // ==========================================
-
-  checkKineticTriggers(fallenPlateId) {
-    if (!this.levelData || !this.levelData.kineticTriggers) return;
-    this.levelData.kineticTriggers.forEach(trigger => {
-      if (trigger.triggerOnFall === fallenPlateId && !trigger.executed) {
-        this.executeKineticTrigger(trigger);
-      }
-    });
-  }
-
-  executeKineticTrigger(trigger) {
-    trigger.executed = true;
-    window.soundEngine.playGearRatchet();
-    this.renderer.triggerShake(14, 12);
-
-    const targetPlate = this.plates.find(p => p.id === trigger.targetPlateId);
-    if (!targetPlate || targetPlate.isCleared) return;
-
-    const body = this.plateBodies.get(targetPlate.id);
-    const cx = targetPlate.x;
-    const cy = targetPlate.y;
-    const deltaAngle = trigger.rotateAngle || (Math.PI / 4);
-
-    // Mechanical escapement step-by-step ratcheting animation (6 ticks)
-    const steps = 6;
-    let stepCount = 0;
-    const stepAngle = deltaAngle / steps;
-
-    const interval = setInterval(() => {
-      stepCount++;
-
-      // Rotate body angle
-      if (body) {
-        Matter.Body.setAngle(body, body.angle + stepAngle);
-      }
-      targetPlate.angle = (targetPlate.angle || 0) + stepAngle;
-
-      // Rotate attached designated screws around center of target plate
-      if (trigger.rotateScrews && trigger.rotateScrews.length > 0) {
-        trigger.rotateScrews.forEach(screwId => {
-          const screw = this.screws.find(s => s.id === screwId);
-          if (!screw) return;
-
-          const dx = screw.x - cx;
-          const dy = screw.y - cy;
-          const cos = Math.cos(stepAngle);
-          const sin = Math.sin(stepAngle);
-
-          screw.x = cx + (dx * cos - dy * sin);
-          screw.y = cy + (dx * sin + dy * cos);
-
-          // Update constraint anchor positions
-          const constraints = this.screwConstraints.get(screwId);
-          if (constraints) {
-            constraints.forEach(c => {
-              c.pointB = { x: screw.x, y: screw.y };
-            });
-          }
-        });
-      }
-
-      this.renderer.spawnSparks(cx, cy, '#ffd700', 8);
-      window.soundEngine.playGearRatchet();
-
-      if (stepCount >= steps) {
-        clearInterval(interval);
-        const msg = trigger.message || 'Çark Döndü: Vidalar Hizalandı! ⚙️';
-        this.renderer.spawnFloatingText(cx, cy - 30, msg, '#ffd700');
-
-        // Show animated banner
-        const banner = document.getElementById('combo-streak-banner');
-        const bannerText = document.getElementById('combo-streak-text');
-        if (banner && bannerText) {
-          banner.classList.add('kinetic-banner');
-          banner.classList.remove('hidden');
-          bannerText.textContent = msg;
-          setTimeout(() => {
-            banner.classList.remove('kinetic-banner');
-            if (this.comboStreak <= 1) {
-              banner.classList.add('hidden');
-            } else {
-              bannerText.textContent = `${this.comboStreak}x KOMBO!`;
-            }
-          }, 3200);
-        }
-      }
-    }, 65);
-  }
-
-  // ==========================================
-  // MAIN GAME & PHYSICS LOOP (60 FPS)
-  // ==========================================
-
+  // ==========================================================
+  // MAIN LOOP
+  // ==========================================================
   startLoop() {
-    let lastTime = performance.now();
-
-    const loop = (currentTime) => {
-      const dt = Math.min((currentTime - lastTime) / 1000, 0.05);
-      lastTime = currentTime;
-
-      // 1. Step Matter.js Physics Engine
-      Matter.Engine.update(this.engine, dt * 1000);
-
-      // 2. Check for Fallen Plates (Physics Clear)
-      this.plates.forEach(plate => {
-        if (plate.isCleared) return;
-        const body = this.plateBodies.get(plate.id);
-        if (body && (body.position.y > 620 || !Number.isFinite(body.position.y))) {
-          plate.isCleared = true;
-          window.soundEngine.playPlateFall();
-          this.renderer.spawnSparks(200, 480, '#d4af37', 20);
-          this.renderer.spawnFloatingText(200, 420, `${plate.name} Düştü!`, '#d4af37');
-          Matter.World.remove(this.engine.world, body);
-
-          // Check Option 4: Kinetic Mechanical Triggers
-          this.checkKineticTriggers(plate.id);
-        }
-      });
-
-      // 3. Render Canvas
-      this.renderer.clear();
-
-      // Draw background holes
-      this.screws.forEach(screw => {
-        this.renderer.drawHole(screw.x, screw.y);
-      });
-
-      // Sort and draw plates by layer
-      const sortedPlates = [...this.plates].sort((a, b) => (a.layer || 1) - (b.layer || 1));
-      sortedPlates.forEach(plate => {
-        if (!plate.isCleared) {
-          const body = this.plateBodies.get(plate.id);
-          this.renderer.drawPlate(plate, body);
-        }
-      });
-
-      // Draw Screws (distinguishing dependent-locked screws)
-      this.screws.forEach(screw => {
-        const blockingPlate = this.findBlockingPlate(screw);
-        const isLocked = (blockingPlate !== null);
-        this.renderer.drawScrew(screw, false, false, isLocked);
-      });
-
-      // Update particle and text effects
-      this.renderer.updateEffects();
-
-      // Restore camera shake if active
-      this.renderer.restoreShake();
-
+    this.lastFrame = performance.now();
+    const loop = now => {
+      const dt = Math.min(50, Math.max(0, now - this.lastFrame));
+      this.lastFrame = now;
+      this.tick(dt);
       requestAnimationFrame(loop);
     };
-
     requestAnimationFrame(loop);
+    setInterval(() => { if (this.screen === 'home' && !document.hidden) this.updateGiftUI(); }, 30000);
+  }
+
+  /** Advances the game by dt ms. Exposed so tests can drive time without frames. */
+  tick(dt) {
+    if (this.paused) return;
+    this.clock += dt;
+    this.runTimers();
+    const lv = this.lv;
+    if (this.screen !== 'play' || !lv) return;
+
+    // Fixed-step physics: identical feel on 60/90/120 Hz screens
+    this.physicsAcc += dt;
+    let steps = 0;
+    while (this.physicsAcc >= 1000 / 60 && steps < 4) {
+      Matter.Engine.update(this.engine, 1000 / 60);
+      this.physicsAcc -= 1000 / 60;
+      steps++;
+    }
+    if (steps === 4) this.physicsAcc = 0;
+
+    for (const p of lv.plates) {
+      if (p.cleared) continue;
+      const y = p.body.position.y;
+      if (y > 760 || !Number.isFinite(y)) {
+        p.cleared = true;
+        Matter.Composite.remove(this.engine.world, p.body);
+        this.sound.playPlateFall();
+      }
+      if (p.wobbleT > 0) p.wobbleT -= dt;
+    }
+    this.render(dt);
+  }
+
+  render(dt) {
+    const lv = this.lv;
+    const r = this.renderer;
+    r.beginFrame(dt);
+    r.drawBoard(lv.level);
+
+    const xray = this.clock < lv.xrayUntil;
+    const highlightId = lv.highlight && this.clock < lv.highlight.until ? lv.highlight.id : null;
+    const board = lv.screws.filter(s => s.state === 'board');
+    const blocked = new Set(board.filter(s => this.blockerOf(s)));
+    const maxLayer = lv.plates.reduce((m, p) => Math.max(m, p.layer), 1);
+
+    // Static plates bottom-up; covered screws sit right above their own plate so higher plates hide them
+    for (let L = 1; L <= maxLayer; L++) {
+      for (const p of lv.plates) {
+        if (p.cleared || p.layer !== L || !p.body.isStatic) continue;
+        const wob = p.wobbleT > 0 ? Math.sin(p.wobbleT / 26) * 0.025 * (p.wobbleT / 260) : 0;
+        r.drawPlate(p, { x: p.body.position.x, y: p.body.position.y, angle: p.body.angle },
+          { highlight: p.id === highlightId ? 1 : 0, wobble: wob });
+      }
+      for (const s of blocked) if (s.layer === L) r.drawScrew(s, { blocked: true, rust: !!s.rust });
+    }
+    // Swinging / falling plates float above
+    for (const p of lv.plates) {
+      if (p.cleared || p.body.isStatic) continue;
+      r.drawPlate(p, { x: p.body.position.x, y: p.body.position.y, angle: p.body.angle }, { alpha: p.falling ? 0.95 : 0.9 });
+    }
+    // Reachable screws on top
+    for (const s of board) if (!blocked.has(s)) r.drawScrew(s, { rust: !!s.rust });
+    for (const s of lv.screws) {
+      if (s.state !== 'leaving' || !s.anim) continue;
+      const t = Math.min(1, (this.clock - s.anim.t0) / SPIN_MS);
+      r.drawScrew(s, { spin: -t * Math.PI * 3, lift: t });
+    }
+    if (xray) for (const s of blocked) r.drawScrew(s, { xray: true });
+    if (lv.hint) {
+      const hs = lv.screws.find(s => s.id === lv.hint && s.state === 'board');
+      if (hs) r.drawHint(hs.x, hs.y, this.clock);
+    }
+    r.updateEffects(dt);
   }
 }
 
-// Launch Game on Window Load
 window.addEventListener('DOMContentLoaded', () => {
   window.chronoGame = new ChronoMasterGame();
 });

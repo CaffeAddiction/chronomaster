@@ -3,439 +3,364 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <title>ChronoMaster: Antika Restorasyonu & Saat Tamiri (Screw & Sort)</title>
-  <meta name="description" content="Fizik tabanlı antika saat ve kilit restorasyonu bulmaca oyunu. Vidaları sök, müzeyi doldur!">
-  <link rel="stylesheet" href="style.css">
-  <!-- Google Fonts: Cinzel & Outfit for luxury antique watchmaker feel -->
+  <meta name="theme-color" content="#140c07">
+  <title>ChronoMaster</title>
+  <meta name="description" content="Halil Usta'nın tozlu saat atölyesini vida vida yeniden ayağa kaldır.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700;900&family=Outfit:wght@400;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700;900&family=Outfit:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <div id="game-container">
 
-    <!-- ==========================================
-         MAIN MENU SCREEN (GİRİŞ & ATÖLYE HUB)
-         ========================================== -->
-    <div id="main-menu" class="menu-overlay">
-      <div class="menu-bg-gears">
-        <div class="bg-gear gear-1">⚙️</div>
-        <div class="bg-gear gear-2">⚙️</div>
-        <div class="bg-gear gear-3">⚙️</div>
+    <!-- =====================================================
+         HOME: THE WORKSHOP
+         ===================================================== -->
+    <section id="screen-home" class="screen">
+      <div class="home-top">
+        <button id="home-rank" class="rank-chip" aria-label="Rütbe">
+          <span class="rank-avatar">🛠️</span>
+          <span class="rank-texts">
+            <span id="home-rank-title" class="rank-title">Çırak</span>
+            <span class="rank-bar"><span id="home-rank-fill" class="rank-fill"></span></span>
+            <span id="home-rank-sub" class="rank-sub">Kalfa olmaya 5 onarım</span>
+          </span>
+        </button>
+        <div class="currency-row">
+          <div class="currency-pill" id="home-stars"><span class="cur-icon">⭐</span><span id="stars-count">0</span></div>
+          <div class="currency-pill" id="home-gears"><span class="cur-icon spin">⚙️</span><span id="gears-count">0</span></div>
+          <button id="btn-settings" class="btn-icon" aria-label="Ayarlar">☰</button>
+        </div>
       </div>
 
-      <div class="menu-content">
-        <div class="menu-badge">KRALİYET HOROLOJİ ATÖLYESİ</div>
-        <h1 class="game-logo">CHRONO<br><span class="logo-sub">MASTER</span></h1>
-        <p class="menu-tagline">Antika Mekanizma & Saat Restorasyonu</p>
+      <div class="home-actions">
+        <button id="btn-daily" class="side-btn" aria-label="Günlük ödül">
+          <span class="side-icon">📅</span><span class="side-label">Günlük</span>
+          <span id="daily-badge" class="side-badge hidden">!</span>
+        </button>
+        <button id="btn-gift" class="side-btn gift" aria-label="Usta'nın hediyesi">
+          <span class="side-icon">🎁</span><span class="side-label" id="gift-timer">HAZIR</span>
+          <span class="ad-tag">📺</span>
+        </button>
+        <button id="btn-vitrin" class="side-btn" aria-label="Koleksiyon vitrini">
+          <span class="side-icon">🏛️</span><span class="side-label">Vitrin</span>
+          <span id="vitrin-badge" class="side-badge coin hidden">+0</span>
+        </button>
+        <button id="btn-guide" class="side-btn" aria-label="Nasıl oynanır">
+          <span class="side-icon">📜</span><span class="side-label">Rehber</span>
+        </button>
+      </div>
 
-        <div class="watchmaker-profile">
-          <div class="profile-avatar">🕰️</div>
-          <div class="profile-info">
-            <span class="rank-title" id="menu-rank">Çırak Saat Ustası</span>
-            <div class="rank-progress-bar">
-              <div class="rank-fill" id="menu-rank-fill" style="width: 20%;"></div>
+      <div class="home-stage">
+        <div id="ws-scene" class="ws-scene"></div>
+      </div>
+
+      <div id="task-card" class="task-card">
+          <div class="task-chapter-row">
+            <span id="task-chapter" class="task-chapter">Bölüm 1: Tozlu Atölye</span>
+            <span id="task-chapter-count" class="task-chapter-count">0/5</span>
+          </div>
+          <div class="task-progress"><div id="task-progress-fill" class="task-progress-fill"></div></div>
+          <div class="task-row">
+            <span id="task-icon" class="task-icon">🧹</span>
+            <div class="task-texts">
+              <span id="task-title" class="task-title">Örümcek ağlarını temizle</span>
+              <span id="task-cost" class="task-cost">⭐ 0/1</span>
             </div>
-            <span class="rank-desc" id="menu-progress-text">1 / 5 Eser Restore Edildi</span>
+            <button id="btn-task" class="btn-task">Yıldız kazan</button>
           </div>
-        </div>
-
-        <div class="menu-actions">
-          <button id="btn-menu-play" class="btn-primary menu-btn-play">
-            <span class="btn-icon-symbol">▶</span>
-            <span>ATÖLYEYE GİR</span>
-          </button>
-          
-          <button id="btn-menu-museum" class="btn-secondary menu-btn">
-            <span class="btn-icon-symbol">🏛️</span>
-            <span>Antika Müzesi & Koleksiyon</span>
-          </button>
-
-          <button id="btn-menu-workshop" class="btn-secondary menu-btn highlight-gold">
-            <span class="btn-icon-symbol">🔨</span>
-            <span>Saatçi Atölyesini Yenile</span>
-          </button>
-
-          <button id="btn-menu-guide" class="btn-secondary menu-btn">
-            <span class="btn-icon-symbol">📜</span>
-            <span>Nasıl Oynanır? (Kılavuz)</span>
-          </button>
-
-          <div class="menu-sub-row">
-            <button id="btn-menu-levels" class="btn-icon-text" title="Bölüm Seçimi">
-              <span>🗂️</span> Bölümler
-            </button>
-            <button id="btn-menu-sound" class="btn-icon-text" title="Ses">
-              <span id="menu-sound-icon">🔊</span> Ses
-            </button>
-            <button id="btn-menu-ambience" class="btn-icon-text" title="Saat Tik-Tak Sesi">
-              <span id="menu-ambience-icon">⏱️</span> Tik-Tak
-            </button>
-          </div>
-        </div>
-
-        <div class="menu-footer">
-          <span>⚙️ Toplam Dişli: <strong id="menu-gears-count">250</strong></span>
-        </div>
       </div>
-    </div>
 
-    <!-- ==========================================
-         IN-GAME HEADER
-         ========================================== -->
-    <header id="game-header">
-      <div class="header-left">
-        <button id="btn-home" class="btn-icon" title="Ana Menü">
-          <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
-        </button>
-        <button id="btn-levels" class="btn-icon" title="Bölüm Seç">
-          <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z"/></svg>
-        </button>
-        <button id="btn-hud-workshop" class="btn-icon" title="Saatçi Atölyesini Yenile">
-          <span style="font-size: 15px;">🔨</span>
+      <button id="btn-play" class="btn-play">
+        <span class="play-icon">▶</span>
+        <span class="play-texts"><span id="play-label">SEVİYE 1</span><span id="play-sub">Müşteri siparişi</span></span>
+      </button>
+    </section>
+
+    <!-- =====================================================
+         LEVEL
+         ===================================================== -->
+    <section id="screen-play" class="screen hidden">
+      <header id="game-header">
+        <button id="btn-pause" class="btn-icon" aria-label="Duraklat">
+          <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
         </button>
         <div class="level-indicator">
           <span class="level-title" id="level-name">SEVİYE 1</span>
-          <span class="level-desc" id="level-subtitle">Cep Saati Kapağı</span>
+          <span class="level-desc" id="level-subtitle">Halil Usta · Cep Saati</span>
+        </div>
+        <div class="score-badge" id="hud-gears"><span class="cog-icon">⚙️</span><span id="gear-count">0</span></div>
+      </header>
+
+      <div id="boxes-container"><div class="boxes-track" id="boxes-track"></div></div>
+
+      <div id="combo-banner" class="combo-banner hidden"><span class="combo-flame">🔥</span><span id="combo-text">3x KOMBO</span></div>
+
+      <div id="canvas-wrapper">
+        <canvas id="game-canvas"></canvas>
+        <div id="level-intro" class="level-intro hidden">
+          <span id="intro-kicker" class="intro-kicker">Leyla Hanım getirdi</span>
+          <span id="intro-item" class="intro-item">Pirinç Masa Saati</span>
+          <span id="intro-goal" class="intro-goal">⭐⭐⭐ için: tepside en fazla 3 vida</span>
         </div>
       </div>
 
-      <div class="header-center">
-        <div class="score-badge" id="hud-gears-badge" title="Kazanılan Antika Dişliler">
-          <span class="cog-icon">⚙️</span>
-          <span id="gear-count">250</span>
+      <div id="tray-container">
+        <div class="rack-header">
+          <span class="rack-title">YEDEK VİDA TEPSİSİ</span>
+          <span class="rack-capacity" id="tray-status">0 / 5</span>
         </div>
+        <div class="buffer-slots" id="tray-slots"></div>
       </div>
 
-      <div class="header-right">
-        <button id="btn-guide-hud" class="btn-icon" title="Kılavuz / Nasıl Oynanır">
-          <span style="font-weight: 900; font-size: 15px;">?</span>
-        </button>
-        <button id="btn-sound" class="btn-icon" title="Ses Aç/Kapat">
-          <span id="sound-icon">🔊</span>
-        </button>
-        <button id="btn-restart" class="btn-icon" title="Yeniden Başlat">
-          <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
-        </button>
-      </div>
-    </header>
+      <footer id="boosters-bar">
+        <button class="booster-btn" id="btn-magnet"><span class="booster-icon">🧲</span><span class="booster-label">Mıknatıs</span><span class="booster-badge" id="cnt-magnet">2</span></button>
+        <button class="booster-btn" id="btn-slot"><span class="booster-icon">➕</span><span class="booster-label">+1 Yuva</span><span class="booster-badge" id="cnt-slot">1</span></button>
+        <button class="booster-btn" id="btn-loupe"><span class="booster-icon">🔍</span><span class="booster-label">Büyüteç</span><span class="booster-badge" id="cnt-loupe">2</span></button>
+        <button class="booster-btn" id="btn-undo"><span class="booster-icon">↩️</span><span class="booster-label">Geri Al</span><span class="booster-badge" id="cnt-undo">3</span></button>
+      </footer>
+    </section>
 
-    <!-- Sorting Trays Area (Screw Jam Boxes) -->
-    <div id="boxes-container">
-      <div class="boxes-track" id="boxes-track">
-        <!-- Boxes generated dynamically via game.js -->
+    <!-- Halil Usta (shared by home and level) -->
+    <button id="master" class="master" aria-label="Halil Usta">
+      <svg viewBox="0 0 64 64" width="56" height="56" aria-hidden="true">
+        <circle cx="32" cy="32" r="31" fill="#2b1a10" stroke="#d4af37" stroke-width="2"/>
+        <path d="M12 60c2-14 10-19 20-19s18 5 20 19z" fill="#5a3a26"/>
+        <path d="M27 41h10v6H27z" fill="#e8c09a"/>
+        <circle cx="32" cy="30" r="13" fill="#f0c8a0"/>
+        <path d="M19 28c0-11 26-11 26 0c-3-6-23-6-26 0z" fill="#e9e9e9"/>
+        <path d="M18 30c-3 1-3 7 1 8M46 30c3 1 3 7-1 8" fill="#e9e9e9"/>
+        <path d="M24 36c4 4 6-1 8 0c2-1 4 4 8 0c-1 5-6 5-8 3c-2 2-7 2-8-3z" fill="#fafafa"/>
+        <circle cx="27" cy="29" r="1.6" fill="#333"/><circle cx="37" cy="29" r="1.6" fill="#333"/>
+        <circle cx="37" cy="29" r="5" fill="none" stroke="#d4af37" stroke-width="1.6"/>
+        <path d="M42 29h4" stroke="#d4af37" stroke-width="1.6"/>
+      </svg>
+    </button>
+    <div id="master-bubble" class="master-bubble hidden"><span class="master-name">Halil Usta</span><span id="master-text"></span></div>
+
+    <!-- Effects layer: coins, stars, toasts, flying screws -->
+    <div id="fx-layer"></div>
+
+    <!-- =====================================================
+         MODALS
+         ===================================================== -->
+
+    <!-- First launch: the master's letter -->
+    <div id="modal-intro" class="modal-overlay hidden">
+      <div class="modal-card letter">
+        <div class="letter-seal">H</div>
+        <p class="letter-greet">Sevgili çırağım,</p>
+        <p>Yaşım ilerledi, ellerim eskisi gibi titremeden vida tutamıyor. Kırk yıl emek verdiğim atölyemi sana bırakıyorum.</p>
+        <p>Biliyorum, şimdi toz ve örümcek ağı içinde. Ama sen her müşterinin saatini onardıkça burası yeniden canlanacak.</p>
+        <p>Vidaları doğru kutuya, sabırla ve sırayla sök. Ben de yanında olacağım.</p>
+        <p class="letter-sign">— Halil Usta</p>
+        <button id="btn-intro-start" class="btn-primary">ATÖLYEYE GİR</button>
       </div>
     </div>
 
-    <!-- Real-time Combo Streak Banner -->
-    <div id="combo-streak-banner" class="combo-banner hidden">
-      <span class="combo-flame">⚡</span>
-      <span id="combo-streak-text">2x KOMBO!</span>
-    </div>
-
-    <!-- Main Interactive Physics Canvas -->
-    <div id="canvas-wrapper">
-      <div id="tutorial-banner" class="tutorial-banner">
-        <span class="banner-icon">💡</span>
-        <span id="banner-text">Pirinç vidaları sökerek üst plakayı serbest bırakın!</span>
-      </div>
-      <canvas id="game-canvas"></canvas>
-      
-      <!-- Visual Tool Overlay (Animated Screwdriver) -->
-      <div id="screwdriver-tool" class="screwdriver hidden">
-        <div class="tool-handle"></div>
-        <div class="tool-shaft"></div>
-        <div class="tool-head"></div>
-      </div>
-
-      <!-- Flying Screws Layer -->
-      <div id="flying-layer"></div>
-    </div>
-
-    <!-- Buffer Slots Rack (Boş Bekleme Delikleri / Tepsi) -->
-    <div id="buffer-rack-container">
-      <div class="rack-header">
-        <span class="rack-title">YEDEK VİDA TEPSİSİ</span>
-        <span class="rack-capacity" id="buffer-status">0 / 5</span>
-      </div>
-      <div class="buffer-slots" id="buffer-slots">
-        <!-- 5 or more buffer slots rendered dynamically -->
-      </div>
-    </div>
-
-    <!-- Bottom Booster Bar -->
-    <footer id="boosters-bar">
-      <button class="booster-btn" id="btn-booster-magnet" title="Mıknatıslı Cımbız (1 Vidayı Doğrudan Alır)">
-        <span class="booster-icon">🧲</span>
-        <span class="booster-label">Mıknatıs</span>
-        <span class="booster-badge" id="count-magnet">2</span>
-      </button>
-
-      <button class="booster-btn" id="btn-booster-slot" title="Ekstra Delik Aç (+1 Slot)">
-        <span class="booster-icon">➕</span>
-        <span class="booster-label">+1 Delik</span>
-        <span class="booster-badge" id="count-slot">1</span>
-      </button>
-
-      <button class="booster-btn" id="btn-booster-nudge" title="Mekanizmayı Titret (Takılan Plakaları Sallar)">
-        <span class="booster-icon">⚡</span>
-        <span class="booster-label">Salla</span>
-        <span class="booster-badge" id="count-nudge">3</span>
-      </button>
-
-      <button class="booster-btn" id="btn-booster-undo" title="Son Hamleyi Geri Al">
-        <span class="booster-icon">↩️</span>
-        <span class="booster-label">Geri Al</span>
-        <span class="booster-badge" id="count-undo">∞</span>
-      </button>
-    </footer>
-
-    <!-- ==========================================
-         MODALS & DIALOGS
-         ========================================== -->
-
-    <!-- 1. MUSEUM & TROPHY ROOM MODAL (OYUNUN AMACI / META-GAME) -->
-    <div id="modal-museum" class="modal-overlay hidden">
-      <div class="modal-card antique-frame museum-card">
-        <div class="modal-header">
-          <div class="museum-header-title">
-            <h2>🏛️ KRALİYET ANTİKA MÜZESİ</h2>
-            <span class="museum-sub">Restore Edilen Şaheserler & Pasif Dişli Geliri</span>
-          </div>
-          <button class="btn-close" id="btn-close-museum">&times;</button>
-        </div>
-        
-        <div class="museum-overview">
-          <div class="museum-stat">
-            <span class="stat-num" id="museum-count">0 / 5</span>
-            <span class="stat-label">Restorasyon</span>
-          </div>
-          <div class="museum-stat">
-            <span class="stat-num" id="museum-income">+0 ⚙️</span>
-            <span class="stat-label">Müze Geliri</span>
-          </div>
-          <button id="btn-claim-museum" class="btn-primary btn-claim" disabled>
-            Geliri Topla
-          </button>
-        </div>
-
-        <div class="museum-gallery" id="museum-gallery">
-          <!-- Dynamically populated museum artifacts -->
-        </div>
-      </div>
-    </div>
-
-    <!-- 2. ILLUSTRATED HOW TO PLAY GUIDE MODAL (AÇIKLAYICILIK) -->
-    <div id="modal-guide" class="modal-overlay hidden">
-      <div class="modal-card antique-frame guide-card">
-        <div class="modal-header">
-          <h2>📜 ATÖLYE REHBERİ: NASIL OYNANIR?</h2>
-          <button class="btn-close" id="btn-close-guide">&times;</button>
-        </div>
-        
-        <div class="guide-steps-container">
-          <div class="guide-step">
-            <div class="step-num">1</div>
-            <div class="step-icon">📦</div>
-            <div class="step-content">
-              <h4>Aktif Kutuyu Takip Et</h4>
-              <p>Üstteki parlayan restorasyon kutusunun rengine bakın. Yalnızca <strong>aynı renkteki 3 vida</strong> kutuyu tamamlar.</p>
-            </div>
-          </div>
-
-          <div class="guide-step">
-            <div class="step-num">2</div>
-            <div class="step-icon">🪛</div>
-            <div class="step-content">
-              <h4>Doğru Sırayla Sök</h4>
-              <p>Vidalara dokunun. Tornavida vidayı çözer. Üstte plaka varsa altındaki vidalar <strong>kilitlidir (🔒)</strong>; önce üst plakayı düşürün!</p>
-            </div>
-          </div>
-
-          <div class="guide-step">
-            <div class="step-num">3</div>
-            <div class="step-icon">⏱️</div>
-            <div class="step-content">
-              <h4>Sarkaç Fiziğinden Yararlan</h4>
-              <p>Bir plakada <strong>tek (1) vida</strong> kaldığında serbestçe salınır. Bu salınım arkadaki gizli vidaların önünü açar!</p>
-            </div>
-          </div>
-
-          <div class="guide-step" style="border-color: var(--brass-bright); background: rgba(212, 175, 55, 0.1);">
-            <div class="step-num">🔒</div>
-            <div class="step-icon">⛓️</div>
-            <div class="step-content">
-              <h4>Katman Hiyerarşisi Kuralı</h4>
-              <p>Üst üste binen mekanizmalarda, <strong>üstteki parçanın tüm vidaları sökülüp parça düşmeden</strong> altındaki parçaya dokunamazsınız! Önce üst köprüleri temizleyin.</p>
-            </div>
-          </div>
-
-          <div class="guide-step">
-            <div class="step-num">4</div>
-            <div class="step-icon">📥</div>
-            <div class="step-content">
-              <h4>Yedek Tepsiyi Doldurma!</h4>
-              <p>Kutuda yeri olmayan vidalar alt yedek tepsiye gider. <strong>5 yuva dolarsa</strong> ve hamle kalmazsa atölye kilitlenir!</p>
-            </div>
-          </div>
-
-          <div class="guide-step">
-            <div class="step-num">5</div>
-            <div class="step-icon">⚡</div>
-            <div class="step-content">
-              <h4>Otomatik Zincirleme Kombo</h4>
-              <p>Yeni bir kutu geldiğinde, yedek tepside bekleyen uyumlu vidalar <strong>otomatik olarak kutuya uçar!</strong></p>
-            </div>
-          </div>
-        </div>
-
-        <button id="btn-close-guide-action" class="btn-primary" style="margin-top: 15px; width: 100%;">
-          ANLADIM, ATÖLYEYE DÖN
-        </button>
-      </div>
-    </div>
-
-    <!-- 3. LEVEL SELECT MODAL -->
-    <div id="modal-levels" class="modal-overlay hidden">
-      <div class="modal-card antique-frame">
-        <div class="modal-header">
-          <h2>RESTORASYON ATÖLYESİ</h2>
-          <button class="btn-close" id="btn-close-levels">&times;</button>
-        </div>
-        <p class="modal-subtitle">Tamir edilecek antika mekanizmayı seçin:</p>
-        <div class="levels-grid" id="levels-grid">
-          <!-- Dynamically populated -->
-        </div>
-      </div>
-    </div>
-
-    <!-- 4. VICTORY / LEVEL COMPLETE MODAL (DOPAMİN & ÖDÜL SANDIĞI) -->
+    <!-- Victory -->
     <div id="modal-victory" class="modal-overlay hidden">
       <div class="modal-card antique-frame celebration">
-        <div class="brass-ribbon">BAŞARIYLA RESTORE EDİLDİ!</div>
-        <div class="stars-row" id="victory-stars">
-          <span class="star" id="star-1">★</span>
-          <span class="star" id="star-2">★</span>
-          <span class="star" id="star-3">★</span>
+        <div class="mini-hud">
+          <div class="currency-pill" id="victory-stars-pill"><span class="cur-icon">⭐</span><span id="victory-stars-total">0</span></div>
+          <div class="currency-pill" id="victory-gears-pill"><span class="cur-icon">⚙️</span><span id="victory-gears-total">0</span></div>
         </div>
-        <h3 id="victory-part-name">1892 İngiliz Cep Saati Kapağı</h3>
-        <p class="victory-message" id="victory-message">Tüm plakalar ve dişliler başarıyla ayrıştırıldı. Parça müzeye eklendi!</p>
-        
-        <div class="museum-unlock-banner" id="victory-unlock-badge">
-          <span class="unlock-icon">🏛️</span>
-          <div class="unlock-texts">
-            <strong id="victory-artifact-title">Yeni Eser Müzeye Eklendi!</strong>
-            <span id="victory-artifact-desc">Saat koleksiyonunuz zenginleşiyor.</span>
-          </div>
+        <div class="brass-ribbon">RESTORE EDİLDİ!</div>
+        <div class="stars-row">
+          <span class="star" id="vstar-1">★</span><span class="star big" id="vstar-2">★</span><span class="star" id="vstar-3">★</span>
+        </div>
+        <h3 id="victory-item">Pirinç Masa Saati</h3>
+        <p class="victory-message" id="victory-thanks">Leyla Hanım çok memnun kaldı.</p>
+        <p id="victory-best" class="victory-best hidden">Bu seviyeden alabileceğin yıldızları zaten almıştın.</p>
+
+        <div id="victory-rewards" class="victory-rewards hidden">
+          <div class="reward-pill"><span>⭐</span><span id="victory-reward-stars">+3</span></div>
+          <div class="reward-pill"><span>⚙️</span><span id="victory-reward-gears">+50</span></div>
         </div>
 
-        <!-- Interactive Mystery Chest (Dopamine Reward) -->
-        <div class="chest-container" id="chest-container">
-          <div class="chest-box-btn" id="btn-open-chest" title="Ödül Sandığını Aç">
+        <div id="victory-artifact" class="museum-unlock-banner hidden">
+          <span class="unlock-icon" id="victory-artifact-icon">🕰️</span>
+          <div class="unlock-texts"><strong id="victory-artifact-title">Vitrine kondu!</strong><span id="victory-artifact-desc">Vitrin geliri</span></div>
+        </div>
+
+        <div class="chest-container">
+          <button class="chest-box-btn" id="btn-chest">
             <div class="chest-glow"></div>
             <span class="chest-graphic">🎁</span>
-            <span class="chest-label">DOKUN & ÖDÜL SANDIĞINI AÇ!</span>
-          </div>
-          <div class="chest-opened-rewards hidden" id="chest-opened-rewards">
-            <div class="reward-pill"><span class="reward-icon">⚙️</span> <span id="reward-gears-amount">+95</span> Dişli</div>
-            <div class="reward-pill highlight" id="reward-booster-pill"><span class="reward-icon">🧲</span> +1 Mıknatıs</div>
-          </div>
-        </div>
-
-        <div class="modal-actions" style="margin-top: 14px;">
-          <button id="btn-next-level" class="btn-primary">SONRAKİ BÖLÜM &rarr;</button>
-          <button id="btn-victory-workshop" class="btn-secondary highlight-gold">🔨 Atölyeyi Yenile</button>
-          <button id="btn-victory-museum" class="btn-secondary">🏛️ Müzeyi Görüntüle</button>
-          <button id="btn-replay-level" class="btn-secondary">Tekrar Oyna</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- 5. GAME OVER / JAMMED MODAL -->
-    <div id="modal-gameover" class="modal-overlay hidden">
-      <div class="modal-card antique-frame fail">
-        <div class="brass-ribbon danger">TEPSİ TIKANDI!</div>
-        <div class="fail-icon">⚠️</div>
-        <h3>Mekanizma Kilitlendi</h3>
-        <p>Yedek vida yuvalarının tümü doldu ve mevcut kutuya uyumlu vida kalmadı.</p>
-        <div class="modal-actions">
-          <button id="btn-extra-slot-revive" class="btn-primary highlight">
-            <span>➕</span> 1 Ekstra Delik Aç & Devam Et
+            <span class="chest-label">ÖDÜL SANDIĞINI AÇ</span>
           </button>
-          <button id="btn-retry-level" class="btn-secondary">Bölümü Baştan Başlat</button>
-          <button id="btn-gameover-home" class="btn-secondary">Ana Menüye Dön</button>
+          <div class="chest-opened-rewards hidden" id="chest-rewards">
+            <div class="reward-pill"><span class="reward-icon">⚙️</span><span id="chest-gears">+60</span></div>
+            <div class="reward-pill highlight hidden" id="chest-booster">🧲 +1 Mıknatıs</div>
+          </div>
+          <button id="btn-chest-double" class="btn-ad hidden"><span class="ad-icon">📺</span> Reklam izle · Sandığı 2 katına çıkar</button>
+        </div>
+
+        <div id="victory-next" class="next-task">
+          <span id="victory-next-icon" class="next-icon">🪚</span>
+          <div class="next-texts">
+            <span id="victory-next-title" class="next-title">Sıradaki onarım</span>
+            <div class="next-bar"><div id="victory-next-fill" class="next-fill"></div></div>
+          </div>
+          <span id="victory-next-count" class="next-count">⭐ 0/2</span>
+        </div>
+
+        <div class="modal-actions">
+          <button id="btn-victory-task" class="btn-primary highlight-gold hidden">🔨 ATÖLYEDE ONAR</button>
+          <button id="btn-victory-next" class="btn-primary">SONRAKİ SEVİYE ▶</button>
+          <button id="btn-victory-home" class="btn-secondary">Atölyeye dön</button>
         </div>
       </div>
     </div>
 
-    <!-- 6. WORKSHOP MAKEOVER MODAL (SAATÇİ DÜKKANI YENİLEME / META-GAME) -->
-    <div id="modal-workshop" class="modal-overlay hidden">
-      <div class="modal-card antique-frame workshop-card">
+    <!-- Out of moves -->
+    <div id="modal-stuck" class="modal-overlay hidden">
+      <div class="modal-card antique-frame fail">
+        <div class="brass-ribbon danger">TEPSİ DOLDU!</div>
+        <div class="fail-icon">🧰</div>
+        <h3>Mekanizma sıkıştı</h3>
+        <p>Yedek tepside yer kalmadı ve kutuya uyan vida açıkta değil. Bir yuva daha açarsan devam edebilirsin.</p>
+        <div class="modal-actions">
+          <button id="btn-stuck-ad" class="btn-ad big"><span class="ad-icon">📺</span> Reklam izle · +1 Yuva ile devam</button>
+          <button id="btn-stuck-gears" class="btn-primary">⚙️ <span id="stuck-gear-cost">120</span> · +1 Yuva ile devam</button>
+          <button id="btn-stuck-retry" class="btn-secondary">Baştan başla</button>
+          <button id="btn-stuck-home" class="btn-secondary">Atölyeye dön</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Booster offer -->
+    <div id="modal-offer" class="modal-overlay hidden">
+      <div class="modal-card antique-frame offer">
+        <button class="btn-close" data-close="modal-offer" aria-label="Kapat">&times;</button>
+        <div class="offer-icon" id="offer-icon">🧲</div>
+        <h3 id="offer-title">Mıknatıs</h3>
+        <p id="offer-desc">Açıklama</p>
+        <div class="modal-actions">
+          <button id="btn-offer-ad" class="btn-ad big"><span class="ad-icon">📺</span> <span id="offer-ad-label">Reklam izle · +1</span></button>
+          <button id="btn-offer-gears" class="btn-primary"><span id="offer-gears-label">150 ⚙️ · +1</span></button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Pause -->
+    <div id="modal-pause" class="modal-overlay hidden">
+      <div class="modal-card antique-frame">
+        <div class="brass-ribbon">MOLA</div>
+        <div class="modal-actions">
+          <button id="btn-resume" class="btn-primary">DEVAM ET</button>
+          <button id="btn-pause-restart" class="btn-secondary">↻ Baştan başla</button>
+          <button id="btn-pause-guide" class="btn-secondary">📜 Nasıl oynanır?</button>
+          <button id="btn-pause-sound" class="btn-secondary"><span id="pause-sound">🔊 Ses: Açık</span></button>
+          <button id="btn-pause-home" class="btn-secondary">⌂ Atölyeye dön</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Daily reward -->
+    <div id="modal-daily" class="modal-overlay hidden">
+      <div class="modal-card antique-frame">
+        <button class="btn-close" data-close="modal-daily" aria-label="Kapat">&times;</button>
+        <div class="brass-ribbon">GÜNLÜK HEDİYE</div>
+        <p class="modal-subtitle">Her gün uğra, seri büyüdükçe hediye büyüsün. 7. gün büyük sandık!</p>
+        <div id="daily-grid" class="daily-grid"></div>
+        <div class="modal-actions">
+          <button id="btn-daily-double" class="btn-ad big hidden"><span class="ad-icon">📺</span> Reklam izle · 2 KAT al</button>
+          <button id="btn-daily-claim" class="btn-primary">AL</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Vitrin / collection -->
+    <div id="modal-vitrin" class="modal-overlay hidden">
+      <div class="modal-card antique-frame museum-card">
         <div class="modal-header">
-          <div class="workshop-header-title">
-            <h2>🔨 KRALİYET SAATÇİ ATÖLYESİ</h2>
-            <span class="workshop-sub">Tarihi Dükkanı Onar, Teçhizatını Kur & Özel Kalıcı Avantajlar Kazan</span>
-          </div>
-          <button class="btn-close" id="btn-close-workshop">&times;</button>
+          <div class="museum-header-title"><h2>🏛️ KOLEKSİYON VİTRİNİ</h2><span class="museum-sub">Onardığın şaheserler müşteri çeker, bahşiş getirir</span></div>
+          <button class="btn-close" data-close="modal-vitrin" aria-label="Kapat">&times;</button>
         </div>
-
-        <!-- Interactive Room Diorama / Before-After Preview -->
-        <div class="workshop-room-preview" id="workshop-room">
-          <div class="room-ambient-glow"></div>
-          <div class="room-banner">
-            <span class="room-status-badge" id="workshop-progress-badge">Atölye Durumu: %0 Yenilendi</span>
-            <span class="room-gears-badge">⚙️ <strong id="workshop-available-gears">250</strong></span>
-          </div>
-
-          <!-- Interactive Furniture / Gear Spots inside the workshop room -->
-          <div class="room-visual-grid">
-            <div class="room-slot-item" id="room-slot-bench">
-              <div class="slot-visual">🪵</div>
-              <span class="slot-name">Usta Tezgahı</span>
-              <span class="slot-badge">Eski Tahta</span>
-            </div>
-            <div class="room-slot-item" id="room-slot-lamp">
-              <div class="slot-visual">🏮</div>
-              <span class="slot-name">Gaz Avizesi</span>
-              <span class="slot-badge">Titrek Mum</span>
-            </div>
-            <div class="room-slot-item" id="room-slot-clock">
-              <div class="slot-visual">🕰️</div>
-              <span class="slot-name">Salon Saati</span>
-              <span class="slot-badge">Boş Köşe</span>
-            </div>
-            <div class="room-slot-item" id="room-slot-tools">
-              <div class="slot-visual">🪛</div>
-              <span class="slot-name">Alet Standı</span>
-              <span class="slot-badge">Paslı Aletler</span>
-            </div>
-            <div class="room-slot-item" id="room-slot-cabinet">
-              <div class="slot-visual">💎</div>
-              <span class="slot-name">Cam Vitrin</span>
-              <span class="slot-badge">Eski Sandık</span>
-            </div>
-            <div class="room-slot-item" id="room-slot-rug">
-              <div class="slot-visual">🧶</div>
-              <span class="slot-name">Saray Halısı</span>
-              <span class="slot-badge">Çıplak Zemin</span>
-            </div>
-          </div>
+        <div class="museum-overview">
+          <div class="museum-stat"><span class="stat-num" id="vitrin-count">0 / 12</span><span class="stat-label">Şaheser</span></div>
+          <div class="museum-stat"><span class="stat-num" id="vitrin-rate">0 ⚙️/saat</span><span class="stat-label">Gelir (en çok 8 saat birikir)</span></div>
+          <div class="currency-pill small" id="vitrin-gears-pill"><span class="cur-icon">⚙️</span><span id="vitrin-gears">0</span></div>
         </div>
-
-        <!-- Upgrade Cards List -->
-        <div class="workshop-upgrades-list" id="workshop-upgrades-list">
-          <!-- Rendered dynamically via game.js -->
+        <div class="vitrin-claim-row">
+          <span id="vitrin-amount" class="vitrin-amount">+0 ⚙️</span>
+          <button id="btn-vitrin-claim" class="btn-primary btn-claim">Topla</button>
+          <button id="btn-vitrin-double" class="btn-ad hidden"><span class="ad-icon">📺</span> 2 kat</button>
         </div>
+        <div class="museum-gallery" id="vitrin-gallery"></div>
+      </div>
+    </div>
+
+    <!-- Chapter complete -->
+    <div id="modal-chapter" class="modal-overlay hidden">
+      <div class="modal-card antique-frame celebration">
+        <div class="brass-ribbon">YENİ RÜTBE</div>
+        <div class="rank-badge" id="chapter-rank">KALFA</div>
+        <h3 id="chapter-title">Bölüm tamam</h3>
+        <p id="chapter-text">...</p>
+        <div id="chapter-rewards" class="victory-rewards"></div>
+        <p id="chapter-next" class="modal-subtitle">Sıradaki bölüm</p>
+        <button id="btn-chapter-ok" class="btn-primary">HARİKA!</button>
+      </div>
+    </div>
+
+    <!-- Settings -->
+    <div id="modal-settings" class="modal-overlay hidden">
+      <div class="modal-card antique-frame">
+        <div class="modal-header"><h2>AYARLAR</h2><button class="btn-close" data-close="modal-settings" aria-label="Kapat">&times;</button></div>
+        <div class="settings-list">
+          <button id="set-sound" class="toggle-row"><span>🔊 Ses efektleri</span><span class="toggle"></span></button>
+          <button id="set-ambience" class="toggle-row"><span>⏱️ Atölye tik-tak sesi</span><span class="toggle"></span></button>
+          <button id="set-haptics" class="toggle-row"><span>📳 Titreşim</span><span class="toggle"></span></button>
+          <button id="set-adprivacy" class="link-row hidden">Reklam gizlilik tercihleri</button>
+          <button id="set-privacy" class="link-row">Gizlilik politikası</button>
+          <button id="set-reset" class="link-row danger">İlerlemeyi sıfırla</button>
+        </div>
+        <p id="set-version" class="set-version">Sürüm</p>
+      </div>
+    </div>
+
+    <!-- Confirm -->
+    <div id="modal-confirm" class="modal-overlay hidden">
+      <div class="modal-card antique-frame">
+        <h3 id="confirm-title">Emin misin?</h3>
+        <p id="confirm-text"></p>
+        <div class="modal-actions">
+          <button id="btn-confirm-yes" class="btn-primary danger">Evet</button>
+          <button id="btn-confirm-no" class="btn-secondary">Vazgeç</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Guide -->
+    <div id="modal-guide" class="modal-overlay hidden">
+      <div class="modal-card antique-frame guide-card">
+        <div class="modal-header"><h2>📜 NASIL OYNANIR?</h2><button class="btn-close" data-close="modal-guide" aria-label="Kapat">&times;</button></div>
+        <div class="guide-steps-container">
+          <div class="guide-step"><div class="step-num">1</div><div class="step-content"><h4>Kutunun rengine bak</h4><p>Üstteki parlayan kutu hangi rengi istiyorsa o renk vidaya dokun. <strong>3 vida</strong> kutuyu kapatır.</p></div></div>
+          <div class="guide-step"><div class="step-num">2</div><div class="step-content"><h4>Üstteki parça önce gelir</h4><p>Bir parçanın altında kalan vida sökülemez. Üstteki parçanın vidalarını sök; parça <strong>tek vidayla kalınca sallanır</strong> ve altını açar, hiç vidası kalmayınca düşer.</p></div></div>
+          <div class="guide-step"><div class="step-num">3</div><div class="step-content"><h4>Yedek tepsiyi idareli kullan</h4><p>Kutuya uymayan vida tepsiye gider. Doğru kutu gelince <strong>kendiliğinden</strong> uçar. Tepsi dolar ve uygun vida kalmazsa sıkışırsın.</p></div></div>
+          <div class="guide-step"><div class="step-num">4</div><div class="step-content"><h4>Paslı vidalar</h4><p>Kahverengi lekeli vidalara önce bir kez dokunup <strong>pasını çöz</strong>, sonra sök.</p></div></div>
+          <div class="guide-step"><div class="step-num">5</div><div class="step-content"><h4>Yıldız topla, dükkânı onar</h4><p>Her iş 1-3 yıldız kazandırır. Yıldızlarla Halil Usta'nın atölyesini parça parça yenile, rütbe atla.</p></div></div>
+          <div class="guide-step"><div class="step-num">🧰</div><div class="step-content"><h4>Aletler</h4><p>🧲 Mıknatıs doğru vidayı çeker · ➕ tepsiye yuva ekler · 🔍 Büyüteç saklı vidaları gösterir · ↩️ son hamleyi geri alır.</p></div></div>
+        </div>
+        <button class="btn-primary" data-close="modal-guide" style="margin-top: 12px; width: 100%;">ANLADIM</button>
       </div>
     </div>
 
   </div>
 
-  <!-- Scripts -->
   <script src="matter.min.js"></script>
-  <script src="js/audio.js"></script>
+  <script src="js/solver.js"></script>
   <script src="js/levels.js"></script>
+  <script src="js/save.js"></script>
+  <script src="js/audio.js"></script>
+  <script src="js/ads.js"></script>
+  <script src="js/fx.js"></script>
   <script src="js/renderer.js"></script>
+  <script src="js/workshop.js"></script>
   <script src="js/game.js"></script>
 </body>
 </html>
