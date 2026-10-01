@@ -1,2 +1,0 @@
-# chronomaster
-chronomaster gizlilik
