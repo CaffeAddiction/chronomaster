@@ -416,7 +416,8 @@ class ChronoMasterGame {
       const holdingScrews = this.screws.filter(s => s.plates.includes(plate.id));
 
       if (holdingScrews.length >= 2) {
-        Matter.Body.setStatic(body, true);
+        // Matter 0.19 overwrites _original on repeated setStatic(true) → mass=Infinity → NaN pose
+        if (!body.isStatic) Matter.Body.setStatic(body, true);
       } else if (holdingScrews.length === 1) {
         if (body.isStatic) {
           Matter.Body.setStatic(body, false);
@@ -555,32 +556,24 @@ class ChronoMasterGame {
    * (or a plate specified in dependsOn) still has uncleared screws holding it down!
    */
   findBlockingPlate(screw) {
-    // 1. Check explicit dependsOn plate dependency
+    // 1. Only the screw's topmost plate decides dependsOn; the plates it passes through below don't
+    let topPlate = null;
     for (const plateId of screw.plates) {
       const plate = this.plates.find(p => p.id === plateId);
-      if (!plate) continue;
+      if (plate && (!topPlate || plate.layer > topPlate.layer)) topPlate = plate;
+    }
 
-      if (plate.dependsOn && plate.dependsOn.length > 0) {
-        for (const parentId of plate.dependsOn) {
-          const parentPlate = this.plates.find(p => p.id === parentId);
-          // If the parent plate is still on the board and not cleared:
-          if (parentPlate && !parentPlate.isCleared) {
-            // If this screw does NOT also pin the parent plate, it belongs strictly to the lower plate!
-            // Therefore, player CANNOT unscrew it until the parent plate is completely unpinned and cleared!
-            if (!screw.plates.includes(parentId)) {
-              return parentPlate;
-            }
-          }
+    if (topPlate && topPlate.dependsOn) {
+      for (const parentId of topPlate.dependsOn) {
+        const parentPlate = this.plates.find(p => p.id === parentId);
+        if (parentPlate && !parentPlate.isCleared && !screw.plates.includes(parentId)) {
+          return parentPlate;
         }
       }
     }
 
     // 2. Check physical geometrical overlap with any uncleared plate on a higher layer
-    let screwMaxLayer = 0;
-    screw.plates.forEach(pId => {
-      const p = this.plates.find(pl => pl.id === pId);
-      if (p && p.layer > screwMaxLayer) screwMaxLayer = p.layer;
-    });
+    const screwMaxLayer = topPlate ? topPlate.layer : 0;
 
     for (const plate of this.plates) {
       if (plate.isCleared) continue;
@@ -873,7 +866,22 @@ class ChronoMasterGame {
       }
     }
 
-    // 2. Check Game Over
+    // 2. Softlock: screws remain but none can be tapped (falling plates get time to clear first)
+    if (this.screws.length > 0 && this.screws.every(s => this.isScrewBlocked(s))) {
+      clearTimeout(this._stuckTimeout);
+      this._stuckTimeout = setTimeout(() => {
+        if (this.isVictory || this.isAnimating || this.screws.length === 0) return;
+        // A plate with no screws left is still falling (or the app is paused) → check again later
+        const falling = this.plates.some(p => !p.isCleared && !this.screws.some(s => s.plates.includes(p.id)));
+        if (falling || document.hidden) {
+          this.checkBoardState();
+        } else if (this.screws.every(s => this.isScrewBlocked(s))) {
+          this.triggerGameOver();
+        }
+      }, 2500);
+    }
+
+    // 3. Check Game Over
     const freeBufferIndex = this.bufferSlots.indexOf(null);
     if (freeBufferIndex === -1) {
       const activeBox = this.boxes[0];
@@ -1438,7 +1446,7 @@ class ChronoMasterGame {
       this.plates.forEach(plate => {
         if (plate.isCleared) return;
         const body = this.plateBodies.get(plate.id);
-        if (body && body.position.y > 620) {
+        if (body && (body.position.y > 620 || !Number.isFinite(body.position.y))) {
           plate.isCleared = true;
           window.soundEngine.playPlateFall();
           this.renderer.spawnSparks(200, 480, '#d4af37', 20);
